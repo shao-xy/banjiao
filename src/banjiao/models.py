@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, time
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -294,3 +294,81 @@ class CoursePublic(BaseModel):
     notes: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+# ============== 文件系统（阶段 ①） ==============
+
+# 固定 7 个角色（教师的"文件夹"），不允许新增/修改。
+# 用 Literal 让 Pydantic 强校验；序列化到 DB 用 string 形式。
+FileRole = Literal[
+    "slides",        # 幻灯片
+    "lecture",       # 讲义
+    "material",      # 资料
+    "homework",      # 作业
+    "submission",    # 学生提交
+    "reference",     # 参考资料（大纲、其他老师材料）
+    "outline",       # 大纲本身
+]
+
+
+# 顶层分类（4 选 1）
+TopKind = Literal["教学", "科研", "事务", "文件"]
+
+
+ROLE_DIRS = {
+    "slides": "幻灯片",
+    "lecture": "讲义",
+    "material": "资料",
+    "homework": "作业",
+    "submission": "提交",
+    "reference": "进度参考",
+    "outline": "大纲",
+}
+# 中文名 → 枚举值
+DIR_TO_ROLE = {v: k for k, v in ROLE_DIRS.items()}
+
+
+# 允许的文件类型白名单（写得严一些，避免被教师误把 .exe 拖进来）
+ALLOWED_EXTENSIONS = frozenset({
+    ".pdf", ".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx",
+    ".md", ".txt", ".csv",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp",
+    ".zip",  # 教案合集
+})
+
+
+class CourseFile(BaseModel):
+    """课程文件清单一项。
+
+    - path_rel：以 data/ 为根的相对路径（含顶层/课程/角色/文件名）
+    - sha256 / size / mtime_ns：上次扫描确定的状态，用于增量检测
+    - is_current：True = 此 sha 是当前文件；False = 历史版本（被覆盖但留了）
+    """
+    id: str = Field(default_factory=_new_id)
+    course_id: Optional[str] = None         # 业务关联课；顶层非教学可空
+    top_kind: Optional[TopKind] = None
+    role: Optional[FileRole] = None
+    path_rel: str = Field(min_length=1, max_length=1000)
+    filename: str = Field(min_length=1, max_length=255)
+    sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    size: int = Field(ge=0)
+    mtime_ns: int = Field(ge=0)
+    is_current: bool = True
+    superseded_at: Optional[datetime] = None
+    replaced_by: Optional[str] = None       # 当前 sha 的 id（指向 replaced 行的 current 行）
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class CourseBinding(BaseModel):
+    """顶层目录 ↔ Course 的绑定记录。
+
+    单一顶层目录仅可绑定到一个 Course；绑定不强制存在数据库中的 Course
+    （用于孤儿文件夹等待教师绑定时占位）。
+    """
+    id: str = Field(default_factory=_new_id)
+    top_kind: TopKind
+    dirname: str = Field(min_length=1, max_length=100)  # 顶层下子目录名
+    course_id: Optional[str] = None                     # NULL = 孤儿
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)

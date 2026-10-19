@@ -16,7 +16,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from .config import settings
-from .models import Affair, Course, Document, Homework, ProgressEntry
+from .models import Affair, Course, CourseBinding, CourseFile, Document, Homework, ProgressEntry
 
 
 SCHEMA_SQL = """
@@ -93,7 +93,38 @@ CREATE TABLE IF NOT EXISTS documents (
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS course_bindings (
+    id          TEXT PRIMARY KEY,
+    top_kind    TEXT NOT NULL,
+    dirname     TEXT NOT NULL,
+    course_id   TEXT REFERENCES courses(id) ON DELETE SET NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bindings_top_dir ON course_bindings(top_kind, dirname);
+
+CREATE TABLE IF NOT EXISTS course_files (
+    id              TEXT PRIMARY KEY,
+    course_id       TEXT REFERENCES courses(id) ON DELETE SET NULL,
+    top_kind        TEXT,
+    role            TEXT,
+    path_rel        TEXT NOT NULL,
+    filename        TEXT NOT NULL,
+    sha256          TEXT NOT NULL,
+    size            INTEGER NOT NULL,
+    mtime_ns        INTEGER NOT NULL,
+    is_current      INTEGER NOT NULL DEFAULT 1,
+    superseded_at   TEXT,
+    replaced_by     TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_files_current ON course_files(path_rel, is_current);
+CREATE INDEX IF NOT EXISTS idx_files_sha ON course_files(sha256);
+CREATE INDEX IF NOT EXISTS idx_files_course ON course_files(course_id);
 """
+
 
 
 # ---------- 行映射 ----------
@@ -141,6 +172,29 @@ def _document_row(d: Document) -> dict:
 
 def _row_to_document(row: sqlite3.Row) -> Document:
     return Document.model_validate(dict(row))
+
+
+def _course_file_row(f: CourseFile) -> dict:
+    d = f.model_dump(mode="json")
+    return d
+
+
+def _row_to_course_file(row: sqlite3.Row) -> CourseFile:
+    return CourseFile.model_validate(dict(row))
+
+
+def _now_iso() -> str:
+    """统一时间戳（ISO 字符串），用于 superseded_at 等字段。"""
+    from datetime import datetime as _dt
+    return _dt.now().isoformat(timespec="seconds")
+
+
+def _binding_row(b: CourseBinding) -> dict:
+    return b.model_dump(mode="json")
+
+
+def _row_to_binding(row: sqlite3.Row) -> CourseBinding:
+    return CourseBinding.model_validate(dict(row))
 
 
 # ---------- DB 类 ----------
@@ -368,6 +422,150 @@ class DB:
             return False
         self._mutate("DELETE FROM documents WHERE id=?", (did,))
         return True
+
+    # ---- course_bindings ----
+    def create_binding(self, b: CourseBinding) -> CourseBinding:
+        try:
+            self._mutate(
+                "INSERT INTO course_bindings (id,top_kind,dirname,course_id,created_at,updated_at) "
+                "VALUES (:id,:top_kind,:dirname,:course_id,:created_at,:updated_at)",
+                _binding_row(b),
+            )
+        except Exception as e:
+            from sqlite3 import IntegrityError as _I
+            if isinstance(e, _I):
+                raise ValueError(f"({b.top_kind}, {b.dirname}) 已存在绑定") from e
+            raise
+        return b
+
+    def get_binding_by_dir(self, top_kind: str, dirname: str) -> CourseBinding | None:
+        rows = self._query_rows(
+            "SELECT * FROM course_bindings WHERE top_kind=? AND dirname=?",
+            (top_kind, dirname),
+        )
+        return _row_to_binding(rows[0]) if rows else None
+
+    def get_binding(self, bid: str) -> CourseBinding | None:
+        rows = self._query_rows("SELECT * FROM course_bindings WHERE id=?", (bid,))
+        return _row_to_binding(rows[0]) if rows else None
+
+    def list_bindings(self) -> list[CourseBinding]:
+        return [
+            _row_to_binding(r)
+            for r in self._query_rows("SELECT * FROM course_bindings ORDER BY top_kind, dirname")
+        ]
+
+    def get_binding_by_course(self, course_id: str) -> CourseBinding | None:
+        rows = self._query_rows(
+            "SELECT * FROM course_bindings WHERE course_id=?",
+            (course_id,),
+        )
+        return _row_to_binding(rows[0]) if rows else None
+
+    def delete_binding(self, bid: str) -> bool:
+        rows = self._query_rows("SELECT id FROM course_bindings WHERE id=?", (bid,))
+        if not rows:
+            return False
+        self._mutate("DELETE FROM course_bindings WHERE id=?", (bid,))
+        return True
+
+    # ---- course_files（清单 + 历史版本）----
+    def upsert_file_current(self, f: CourseFile) -> CourseFile:
+        """把当前文件版本写入：旧当前版本改为历史（is_current=0）。"""
+        now_text = _now_iso()
+        # 1) 找出该 path_rel 的当前行
+        existing = self._query_rows(
+            "SELECT * FROM course_files WHERE path_rel=? AND is_current=1",
+            (f.path_rel,),
+        )
+        if existing:
+            old_id = existing[0]["id"]
+            old_sha = existing[0]["sha256"]
+            new_id = f.id
+            self._mutate(
+                "UPDATE course_files SET is_current=0, superseded_at=?, replaced_by=?, updated_at=? "
+                "WHERE id=?",
+                (now_text, new_id, now_text, old_id),
+            )
+            # 如果旧 sha 与新 sha 相同（用户实际上重写了相同内容）则合并
+            if old_sha == f.sha256:
+                # 直接删旧的，把新的 is_current=1
+                self._mutate("DELETE FROM course_files WHERE id=?", (old_id,))
+                self._mutate(
+                    "INSERT INTO course_files "
+                    "(id,course_id,top_kind,role,path_rel,filename,sha256,size,mtime_ns,"
+                    "is_current,superseded_at,replaced_by,created_at,updated_at) "
+                    "VALUES (:id,:course_id,:top_kind,:role,:path_rel,:filename,:sha256,"
+                    ":size,:mtime_ns,1,NULL,NULL,:created_at,:updated_at)",
+                    _course_file_row(f),
+                )
+            else:
+                # 历史保留：插入新行（is_current=1）
+                self._mutate(
+                    "INSERT INTO course_files "
+                    "(id,course_id,top_kind,role,path_rel,filename,sha256,size,mtime_ns,"
+                    "is_current,superseded_at,replaced_by,created_at,updated_at) "
+                    "VALUES (:id,:course_id,:top_kind,:role,:path_rel,:filename,:sha256,"
+                    ":size,:mtime_ns,1,NULL,NULL,:created_at,:updated_at)",
+                    _course_file_row(f),
+                )
+        else:
+            # 没有旧当前行：直接插
+            self._mutate(
+                "INSERT INTO course_files "
+                "(id,course_id,top_kind,role,path_rel,filename,sha256,size,mtime_ns,"
+                "is_current,superseded_at,replaced_by,created_at,updated_at) "
+                "VALUES (:id,:course_id,:top_kind,:role,:path_rel,:filename,:sha256,"
+                ":size,:mtime_ns,1,NULL,NULL,:created_at,:updated_at)",
+                _course_file_row(f),
+            )
+        return f
+
+    def get_file_current(self, path_rel: str) -> CourseFile | None:
+        rows = self._query_rows(
+            "SELECT * FROM course_files WHERE path_rel=? AND is_current=1",
+            (path_rel,),
+        )
+        return _row_to_course_file(rows[0]) if rows else None
+
+    def get_file_by_sha(self, sha256: str) -> CourseFile | None:
+        rows = self._query_rows(
+            "SELECT * FROM course_files WHERE sha256=? AND is_current=1",
+            (sha256,),
+        )
+        return _row_to_course_file(rows[0]) if rows else None
+
+    def list_files_current(
+        self,
+        course_id: str | None = None,
+        role: str | None = None,
+    ) -> list[CourseFile]:
+        sql = "SELECT * FROM course_files WHERE is_current=1"
+        params: list = []
+        if course_id is not None:
+            sql += " AND course_id=?"
+            params.append(course_id)
+        if role is not None:
+            sql += " AND role=?"
+            params.append(role)
+        sql += " ORDER BY path_rel"
+        return [_row_to_course_file(r) for r in self._query_rows(sql, tuple(params))]
+
+    def list_history(self, path_rel: str) -> list[CourseFile]:
+        rows = self._query_rows(
+            "SELECT * FROM course_files WHERE path_rel=? ORDER BY created_at DESC",
+            (path_rel,),
+        )
+        return [_row_to_course_file(r) for r in rows]
+
+    def delete_files_for_path(self, path_rel: str) -> int:
+        rows = self._query_rows(
+            "SELECT id FROM course_files WHERE path_rel=?",
+            (path_rel,),
+        )
+        for r in rows:
+            self._mutate("DELETE FROM course_files WHERE id=?", (r["id"],))
+        return len(rows)
 
 
 db = DB()
