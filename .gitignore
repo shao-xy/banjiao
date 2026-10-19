@@ -27,3 +27,4 @@ tests/__pycache__/
 
 # 本地笔记（不进 git，仅开发者本地保留）
 NOTES-references.md
+dist/
