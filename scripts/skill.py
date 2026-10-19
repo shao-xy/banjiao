@@ -190,6 +190,37 @@ def route(action: str, raw: str | None) -> int:
             return _fail(missing_param("id"))
         return _wrap(lambda: service.course_apply_period(args["id"]).model_dump(mode="json"))
 
+    if a == "course.set_outline_path":
+        if "id" not in args:
+            return _fail(missing_param("id"))
+        if "filename" not in args:
+            return _fail(missing_param("filename"))
+        return _wrap(lambda: service.course_set_outline_path(args["id"], args["filename"]).model_dump(mode="json"))
+
+    if a == "course.get_outline":
+        if "id" not in args:
+            return _fail(missing_param("id"))
+        return _wrap(lambda: service.course_get_outline(args["id"]))
+
+    if a == "course.refresh_outline":
+        if "id" not in args:
+            return _fail(missing_param("id"))
+        if "parsed" not in args:
+            return _fail(missing_param("parsed", "请传 {weeks:[{week,topics:[...]},...]}"))
+        return _wrap(lambda: service.course_refresh_outline(args["id"], args["parsed"]).model_dump(mode="json"))
+
+    if a == "course.next_topic":
+        if "id" not in args:
+            return _fail(missing_param("id"))
+        target = None
+        if "target_date" in args and args["target_date"]:
+            from datetime import date as _date
+            try:
+                target = _date.fromisoformat(args["target_date"])
+            except ValueError:
+                return _fail(bad_param("target_date", "应为 YYYY-MM-DD"))
+        return _wrap(lambda: service.course_next_topic(args["id"], target))
+
     # ===== 进度 =====
     if a == "progress.list":
         return _wrap(lambda: [p.model_dump(mode="json") for p in service.list_progress(args.get("course_id"))])
@@ -398,7 +429,7 @@ HELP_TEXT = """伴教 Skill · LLM 入口脚本
     python scripts/skill.py vec.search --json '{\"query\":\"极限定义\",\"top_k\":3}'
 
 可用 action：
-  course.list / course.get / course.create / course.update / course.delete / course.today / course.week / course.apply_period
+  course.list / course.get / course.create / course.update / course.delete / course.today / course.week / course.apply_period / course.set_outline_path / course.get_outline / course.refresh_outline / course.next_topic
   progress.list / progress.create / progress.update / progress.delete
   homework.list / homework.create / homework.update / homework.delete / homework.due_soon
   affair.list / affair.create / affair.update / affair.delete / affair.mark_reminded

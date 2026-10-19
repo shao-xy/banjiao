@@ -1061,3 +1061,179 @@ def fs_write_text(course_id: str, role: str, filename: str, text: str) -> dict:
         "sha256": cf.sha256 if cf else _sha256_file(full),
         "mtime_ns": full.stat().st_mtime_ns,
     }
+
+
+# ============== 阶段 ④：大纲 + 进度结合 ==============
+
+def course_set_outline_path(course_id: str, filename: str) -> Course:
+    """设置课程的大纲文件名（如 outline.md）。文件必须落在绑定目录的"大纲"角色子目录里。"""
+    if not filename:
+        raise bad_param("filename", "不能为空")
+    c = get_course(course_id)
+    bind = db.get_binding_by_course(course_id)
+    if bind is None:
+        raise not_found("课程绑定", f"课程 {course_id} 尚未绑定到任何文件夹")
+    rel = f"{bind.top_kind}/{bind.dirname}/大纲/{filename}"
+    full = _safe_path(rel)
+    if not full.exists() or not full.is_file():
+        raise not_found("大纲文件", rel)
+    c.outline_path = filename
+    c.outline_cache = None  # 文件改了或首次设置 → 旧 cache 失效
+    c.updated_at = datetime.now()
+    db.update_course(c)
+    return c
+
+
+def course_get_outline(course_id: str) -> dict:
+    """读取课程大纲的当前状态。
+
+    返回：
+        course_id, outline_path, has_file, file_size, file_mtime_ns,
+        cache_present: bool   (outline_cache 是否非空)
+        cache_mtime_ns: int|None  (缓存的 file_mtime_ns；用于判断 stale)
+        stale: bool           (cache 与磁盘文件 mtime 不一致 → 建议重新解析)
+        text: str|None        (若 file 可达且 .md/.txt/.csv → 原始文本；否则 None)
+        cached: dict|None     (大模型解析后回填的结构化大纲)
+    """
+    c = get_course(course_id)
+    bind = db.get_binding_by_course(course_id)
+    has_file = False
+    file_size = 0
+    file_mtime_ns: Optional[int] = None
+    text: Optional[str] = None
+    if c.outline_path and bind is not None:
+        rel = f"{bind.top_kind}/{bind.dirname}/大纲/{c.outline_path}"
+        try:
+            full = _safe_path(rel)
+            if full.exists() and full.is_file():
+                has_file = True
+                st = full.stat()
+                file_size = st.st_size
+                file_mtime_ns = st.st_mtime_ns
+                if full.suffix.lower() in _TEXT_EXTS:
+                    try:
+                        text = full.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        text = None
+        except Exception:
+            pass
+    cache = c.outline_cache or {}
+    cache_mtime = cache.get("file_mtime_ns") if isinstance(cache, dict) else None
+    stale = bool(
+        has_file and c.outline_cache is not None and file_mtime_ns != cache_mtime
+    )
+    return {
+        "course_id": course_id,
+        "outline_path": c.outline_path,
+        "has_file": has_file,
+        "file_size": file_size,
+        "file_mtime_ns": file_mtime_ns,
+        "cache_present": c.outline_cache is not None,
+        "cache_mtime_ns": cache_mtime,
+        "stale": stale,
+        "text": text,
+        "cached": c.outline_cache,
+    }
+
+
+def course_refresh_outline(course_id: str, parsed: dict) -> Course:
+    """大模型把大纲解析完回填。parsed 形如：
+        {weeks: [{week: 1, topics: ["极限", "连续"]}, ...], file_mtime_ns: 123456}
+
+    Skill 不调 LLM，只把大模型产出存进 outline_cache，并把当前 file_mtime_ns 写入。
+    下次 course.get_outline 用它判断 stale。
+    """
+    c = get_course(course_id)
+    if not isinstance(parsed, dict):
+        raise bad_param("parsed", "必须为对象 {weeks:[{week,topics:[...]},...], file_mtime_ns?}")
+    # 注入当前文件 mtime（若 caller 没传）
+    if "file_mtime_ns" not in parsed and c.outline_path:
+        bind = db.get_binding_by_course(course_id)
+        if bind is not None:
+            rel = f"{bind.top_kind}/{bind.dirname}/大纲/{c.outline_path}"
+            try:
+                full = _safe_path(rel)
+                if full.exists() and full.is_file():
+                    parsed["file_mtime_ns"] = full.stat().st_mtime_ns
+            except Exception:
+                pass
+    c.outline_cache = parsed
+    c.updated_at = datetime.now()
+    db.update_course(c)
+    return c
+
+
+def course_next_topic(course_id: str, target_date: date | None = None) -> dict:
+    """根据大纲 + ProgressEntry，给出"target_date 应该讲到哪里"的事实卡。
+
+    返回字段：
+        course_id, target_date, current_week, target_week,
+        outline_target: str|None   (大纲中 target_week 的 topics 拼接)
+        recent_topic: str|None     (最后一次 ProgressEntry.topic)
+        lag_weeks: int             (大纲周次 - 已讲周次；>0 表示落后)
+        lesson_date: date|None     (target_date 当周是否有课；None 表示没课)
+        hint: str
+    """
+    c = get_course(course_id)
+    target_date = target_date or date.today()
+    progress = list_progress(course_id)
+    progress.sort(key=lambda p: p.lesson_date, reverse=True)
+    last = progress[0] if progress else None
+
+    # target_week
+    target_week: Optional[int] = None
+    if c.semester_start is not None:
+        delta_days = (target_date - c.semester_start).days
+        if delta_days >= 0:
+            target_week = delta_days // 7 + 1
+
+    # 命中检查：target_date 当天是否应上课（依 weekday / week_pattern / semester_end）
+    lesson_date: Optional[date] = None
+    if c.weekday is not None:
+        occs = _week_occurrences(c, target_date, target_date)
+        if occs:
+            lesson_date = occs[0][0]
+
+    # 找 outline_cache 里 target_week 的 topics
+    outline_target_topics: Optional[str] = None
+    last_done_week: Optional[int] = None
+    if isinstance(c.outline_cache, dict):
+        for wk in c.outline_cache.get("weeks", []) or []:
+            if not isinstance(wk, dict):
+                continue
+            if wk.get("week") == target_week:
+                topics = wk.get("topics") or []
+                outline_target_topics = "\n".join(str(t) for t in topics) if topics else None
+            if last is not None and wk.get("week") is not None:
+                # 用 progress 记录的 lesson_date 反推属于大纲第几周
+                pass
+        # 简化：按 progress 的 lesson_date 反推
+        if last is not None and c.semester_start is not None:
+            last_delta = (last.lesson_date - c.semester_start).days
+            if last_delta >= 0:
+                last_done_week = last_delta // 7 + 1
+
+    lag_weeks = (target_week or 0) - (last_done_week or 0)
+    if last_done_week is None:
+        hint = "还没有任何进度记录，请先创建首条 ProgressEntry。"
+    elif last_done_week == target_week:
+        hint = "大纲周次与已讲一致，无需补进度。"
+    elif lag_weeks > 0:
+        hint = f"大纲本周应讲第 {target_week} 周，落后 {lag_weeks} 周。"
+    elif lag_weeks < 0:
+        hint = f"已讲到第 {last_done_week} 周，超前大纲 {-lag_weeks} 周。"
+    else:
+        hint = "无明确周次差异（target_week 为空时）。"
+
+    return {
+        "course_id": course_id,
+        "target_date": target_date.isoformat(),
+        "target_week": target_week,
+        "current_week": last_done_week,
+        "outline_target": outline_target_topics,
+        "recent_topic": last.topic if last is not None else None,
+        "recent_lesson_date": last.lesson_date.isoformat() if last is not None else None,
+        "lag_weeks": lag_weeks,
+        "lesson_date": lesson_date.isoformat() if lesson_date else None,
+        "hint": hint,
+    }

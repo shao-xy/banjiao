@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS courses (
     week_pattern    TEXT NOT NULL DEFAULT 'all',
     weeks           TEXT NOT NULL DEFAULT '[]',
     period_no       INTEGER,
+    outline_path    TEXT,
+    outline_cache   TEXT,
     notes           TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
@@ -135,12 +137,21 @@ def _course_row(c: Course) -> dict:
     return {
         **c.model_dump(mode="json"),
         "weeks": json.dumps(c.weeks or [], ensure_ascii=False),
+        "outline_cache": json.dumps(c.outline_cache, ensure_ascii=False) if c.outline_cache is not None else None,
     }
 
 
 def _row_to_course(row: sqlite3.Row) -> Course:
     d = dict(row)
     d["weeks"] = json.loads(d.get("weeks") or "[]")
+    raw_cache = d.get("outline_cache")
+    if raw_cache:
+        try:
+            d["outline_cache"] = json.loads(raw_cache)
+        except Exception:
+            d["outline_cache"] = None
+    else:
+        d["outline_cache"] = None
     return Course.model_validate(d)
 
 
@@ -231,9 +242,11 @@ class DB:
     def create_course(self, c: Course) -> Course:
         self._mutate(
             "INSERT INTO courses (id,name,class_group,location,semester_start,semester_end,"
-            "start_time,end_time,weekday,week_pattern,weeks,period_no,notes,created_at,updated_at) "
+            "start_time,end_time,weekday,week_pattern,weeks,period_no,"
+            "outline_path,outline_cache,notes,created_at,updated_at) "
             "VALUES (:id,:name,:class_group,:location,:semester_start,:semester_end,"
-            ":start_time,:end_time,:weekday,:week_pattern,:weeks,:period_no,:notes,:created_at,:updated_at)",
+            ":start_time,:end_time,:weekday,:week_pattern,:weeks,:period_no,"
+            ":outline_path,:outline_cache,:notes,:created_at,:updated_at)",
             _course_row(c),
         )
         return c
@@ -254,6 +267,7 @@ class DB:
             "semester_start=:semester_start, semester_end=:semester_end, "
             "start_time=:start_time, end_time=:end_time, weekday=:weekday, "
             "week_pattern=:week_pattern, weeks=:weeks, period_no=:period_no, "
+            "outline_path=:outline_path, outline_cache=:outline_cache, "
             "notes=:notes, updated_at=:updated_at WHERE id=:id",
             _course_row(c),
         )

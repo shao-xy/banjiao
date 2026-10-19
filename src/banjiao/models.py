@@ -98,6 +98,11 @@ class Course(BaseModel):
     week_pattern: WeekPattern = "all"
     weeks: Optional[list[int]] = None
     period_no: Optional[int] = Field(default=None, ge=1, le=12)
+    # 大纲文件：仅存文件名（如 "outline.md"）；完整路径由绑定目录 + 大纲角色子目录推导。
+    # outline_cache: 大模型解析后的结构化大纲（dict 形式）。
+    #   Skill 不调 LLM；大模型解析完后调用 course.refresh_outline 回填。
+    outline_path: Optional[str] = Field(default=None, max_length=255)
+    outline_cache: Optional[dict] = None
     notes: Optional[str] = Field(default=None, max_length=2000)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
@@ -131,6 +136,7 @@ class CourseCreate(BaseModel):
     week_pattern: WeekPattern = "all"
     weeks: Optional[list[int]] = None
     period_no: Optional[int] = Field(default=None, ge=1, le=12)
+    outline_path: Optional[str] = Field(default=None, max_length=255)
     notes: Optional[str] = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
@@ -161,6 +167,7 @@ class CourseUpdate(BaseModel):
     week_pattern: Optional[WeekPattern] = None
     weeks: Optional[list[int]] = None
     period_no: Optional[int] = Field(default=None, ge=1, le=12)
+    outline_path: Optional[str] = Field(default=None, max_length=255)
     notes: Optional[str] = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
