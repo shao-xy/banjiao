@@ -114,13 +114,15 @@ def package(output: Path, include_tests: bool, include_git: bool, version: str |
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="把 banjiao/ 目录打包成 Skill zip")
+    p = argparse.ArgumentParser(description="把 banjiao/ 目录打包成 Skill zip / 解压目录")
     p.add_argument("--output", type=Path, default=None,
                    help="输出路径（默认 dist/banjiao.zip）")
     p.add_argument("--no-tests", action="store_true",
                    help="不打包 tests/ 目录（产物更小，给 Agent 用够了）")
     p.add_argument("--version", default=None,
                    help="写入 PACKAGE.md 的版本号（如 0.2.0）")
+    p.add_argument("--extract", action="store_true",
+                   help="额外解压出【解压即用】目录（适合直接拖入 TRAE/Claude）")
     args = p.parse_args()
 
     output = args.output or (DEFAULT_OUTPUT_DIR / "banjiao.zip")
@@ -136,6 +138,16 @@ def main() -> int:
         slim = DEFAULT_OUTPUT_DIR / "banjiao-slim.zip"
         package(output=slim, include_tests=False, include_git=False, version=args.version)
         print(f"\n两个版本：\n  完整: {output}\n  精简: {slim}")
+
+        if args.extract:
+            # 把精简版解压到 dist/banjiao-extracted/（TRAE 可直接拖入）
+            extract_dir = DEFAULT_OUTPUT_DIR / "banjiao-extracted"
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir, ignore_errors=True)
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(slim) as zf:
+                zf.extractall(extract_dir)
+            print(f"  解压: {extract_dir}/banjiao/  ← 直接拖入 TRAE / Claude 对话窗")
 
     return 0
 
