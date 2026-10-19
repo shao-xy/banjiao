@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = SKILL_ROOT / "dist"
+GITHUB_REPO = "shao-xy/banjiao"  # ← 改这里
 
 
 def package(output: Path, include_tests: bool, include_git: bool, version: str | None = None) -> Path:
@@ -123,6 +125,8 @@ def main() -> int:
                    help="写入 PACKAGE.md 的版本号（如 0.2.0）")
     p.add_argument("--extract", action="store_true",
                    help="额外解压出【解压即用】目录（适合直接拖入 TRAE/Claude）")
+    p.add_argument("--release", action="store_true",
+                   help="打包后自动 gh release create v{version}（需要 gh CLI 已登录）")
     args = p.parse_args()
 
     output = args.output or (DEFAULT_OUTPUT_DIR / "banjiao.zip")
@@ -148,6 +152,44 @@ def main() -> int:
             with zipfile.ZipFile(slim) as zf:
                 zf.extractall(extract_dir)
             print(f"  解压: {extract_dir}/banjiao/  ← 直接拖入 TRAE / Claude 对话窗")
+
+        # GitHub Release（可选）
+        if args.release:
+            if not args.version:
+                print("✗ --release 必须同时传 --version")
+                return 1
+            tag = f"v{args.version}"
+            print(f"\n→ 创建 GitHub Release {tag}")
+            notes = (
+                f"## 伴教 Skill {tag}\n\n"
+                f"直接下载 banjiao-slim.zip（0.06 MB，不含 tests/），解压后让 Agent 读 SKILL.md，\n"
+                f"调 scripts/skill.py 子进程操作 SQLite 数据。\n\n"
+                f"### 大模型加载\n\n"
+                f"- **TRAE / Claude 对话窗**：拖入 `banjiao/` 文件夹\n"
+                f"- **zip URL**：https://github.com/{GITHUB_REPO}/releases/download/{tag}/banjiao-slim.zip\n"
+                f"- **git clone**：`git clone https://github.com/{GITHUB_REPO}.git`\n"
+            )
+            try:
+                r = subprocess.run(
+                    ["gh", "release", "create", tag,
+                     str(slim),  # banjiao-slim.zip
+                     "--repo", GITHUB_REPO,
+                     "--title", f"伴教 Skill {tag}",
+                     "--notes", notes,
+                     "--latest"],  # 标记为 latest
+                    capture_output=True, text=True,
+                )
+                if r.returncode == 0:
+                    print(f"✓ Release 创建成功：{r.stdout.strip()}")
+                else:
+                    print(f"✗ gh release 失败：{r.stderr.strip()}")
+                    print("  可能原因：gh CLI 未登录 / repo 不存在 / 权限不足")
+                    print("  手动替代：gh release create " + tag + " " + str(slim))
+            except FileNotFoundError:
+                print("✗ gh 命令未找到。请先安装 GitHub CLI：https://cli.github.com/")
+        elif not args.release:
+            print(f"\n  安装到 TRAE：拖入 {extract_dir}/banjiao/ 整个文件夹")
+            print(f"  或 zip URL（发布后）：https://github.com/{GITHUB_REPO}/releases/latest/download/banjiao-slim.zip")
 
     return 0
 
