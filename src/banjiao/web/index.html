@@ -16,6 +16,9 @@
       <button data-tab="homework">作业</button>
       <button data-tab="affairs">事务</button>
       <button data-tab="progress">进度</button>
+      <button data-tab="outline">大纲</button>
+      <button data-tab="files">文件</button>
+      <button data-tab="schedule">时间表</button>
     </nav>
     <div class="vector-flag">向量检索：<span id="vec-flag">?</span></div>
   </header>
@@ -54,6 +57,46 @@
       <h2>课程进度</h2>
       <select id="progress-course-filter"><option value="">全部课程</option></select>
       <div id="progress-list" class="list"></div>
+    </section>
+
+    <section id="view-outline" class="view">
+      <h2>大纲 + Next Topic</h2>
+      <div class="toolbar">
+        <label>课程 <select id="outline-course-filter"><option value="">选择课程</option></select></label>
+        <label>目标日期 <input type="date" id="outline-target-date" /></label>
+        <button id="outline-recompute">算下一讲</button>
+      </div>
+      <div id="outline-status" class="status-bar"></div>
+      <div id="outline-next-topic" class="card next-topic"></div>
+      <h3>大纲文本</h3>
+      <div id="outline-text" class="card"></div>
+      <h3>已解析大纲（缓存）</h3>
+      <div id="outline-cache" class="card"></div>
+    </section>
+
+    <section id="view-files" class="view">
+      <h2>课程文件</h2>
+      <div class="toolbar">
+        <label>课程 <select id="files-course-filter"><option value="">选择课程</option></select></label>
+        <label>角色 <select id="files-role-filter">
+          <option value="">全部</option>
+          <option value="slides">幻灯片</option>
+          <option value="lecture">讲义</option>
+          <option value="material">资料</option>
+          <option value="homework">作业</option>
+          <option value="submission">提交</option>
+          <option value="reference">进度参考</option>
+          <option value="outline">大纲</option>
+        </select></label>
+        <button id="files-refresh">重新扫描</button>
+      </div>
+      <div id="files-list" class="list"></div>
+    </section>
+
+    <section id="view-schedule" class="view">
+      <h2>学校课程时间表</h2>
+      <p class="hint">11 节默认时间表（教师可调用 <code>school.set_schedule</code> 覆盖，落盘 <code>data/_school_schedule.json</code>）。</p>
+      <div id="schedule-grid" class="schedule-grid"></div>
     </section>
   </main>
 

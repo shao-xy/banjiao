@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from .config import settings
 from .llm_errors import SkillError
@@ -243,6 +244,178 @@ def vector_search(q: str, top_k: int = 5):
         return vector_index.get_index().search(q, top_k=top_k)
     except SkillError as e:
         return _err(e)
+
+
+# ============== 文件系统（阶段 ①-③） ==============
+
+@app.get("/api/fs/top-dirs")
+def fs_list_top_dirs():
+    return service.fs_list_top_dirs()
+
+
+@app.post("/api/fs/init")
+def fs_init():
+    return service.fs_init()
+
+
+class FsBindBody(BaseModel):
+    top_kind: str
+    dirname: str
+    course_id: str
+
+
+@app.post("/api/fs/bind-course")
+def fs_bind_course(body: FsBindBody):
+    try:
+        return service.fs_bind_course(body.top_kind, body.dirname, body.course_id)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+@app.delete("/api/fs/bindings/{binding_id}")
+def fs_unbind_course(binding_id: str):
+    try:
+        return service.fs_unbind_course(binding_id)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+@app.post("/api/fs/scan-course")
+def fs_scan_course(body: dict):
+    try:
+        return service.fs_scan_course(body["course_id"])
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+@app.get("/api/courses/{cid}/files")
+def course_list_files(cid: str, role: str | None = None):
+    try:
+        return service.course_list_files(cid, role=role)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+@app.get("/api/courses/{cid}/files/{role}/{filename}")
+def fs_read_file(cid: str, role: str, filename: str):
+    try:
+        return service.fs_read_file(cid, role, filename)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+@app.get("/api/courses/{cid}/files/{role}/{filename}/history")
+def fs_file_history(cid: str, role: str, filename: str):
+    try:
+        return service.fs_file_history(cid, role, filename)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+class FsWriteTextBody(BaseModel):
+    text: str
+
+
+@app.put("/api/courses/{cid}/files/{role}/{filename}")
+def fs_write_text(cid: str, role: str, filename: str, body: FsWriteTextBody):
+    try:
+        return service.fs_write_text(cid, role, filename, body.text)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+@app.post("/api/fs/archive")
+def fs_archive(body: dict):
+    try:
+        return service.fs_archive(body["path"])
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+class FsDeleteBody(BaseModel):
+    path: str
+    confirm: str | None = None
+
+
+@app.post("/api/fs/delete")
+def fs_delete(body: FsDeleteBody):
+    try:
+        return service.fs_delete(body.path, confirm=body.confirm)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+# ============== 学校课程时间表 ==============
+
+@app.get("/api/school/schedule")
+def school_get_schedule():
+    return service.school_get_schedule()
+
+
+class SchoolSetBody(BaseModel):
+    schedule: dict
+
+
+@app.put("/api/school/schedule")
+def school_set_schedule(body: SchoolSetBody):
+    try:
+        return service.school_set_schedule(body.schedule)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+# ============== 大纲 + 进度结合（阶段 ④） ==============
+
+@app.post("/api/courses/{cid}/apply-period")
+def course_apply_period(cid: str):
+    try:
+        return service.course_apply_period(cid).model_dump(mode="json")
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+class CourseSetOutlineBody(BaseModel):
+    filename: str
+
+
+@app.post("/api/courses/{cid}/outline-path")
+def course_set_outline_path(cid: str, body: CourseSetOutlineBody):
+    try:
+        return service.course_set_outline_path(cid, body.filename).model_dump(mode="json")
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+@app.get("/api/courses/{cid}/outline")
+def course_get_outline(cid: str):
+    try:
+        return service.course_get_outline(cid)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+class CourseRefreshOutlineBody(BaseModel):
+    parsed: dict
+
+
+@app.put("/api/courses/{cid}/outline-cache")
+def course_refresh_outline(cid: str, body: CourseRefreshOutlineBody):
+    try:
+        return service.course_refresh_outline(cid, body.parsed).model_dump(mode="json")
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+@app.get("/api/courses/{cid}/next-topic")
+def course_next_topic(cid: str, target_date: str | None = None):
+    try:
+        from datetime import date as _date
+        td = _date.fromisoformat(target_date) if target_date else None
+        return service.course_next_topic(cid, td)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"code": "bad_param", "message": "target_date 应为 YYYY-MM-DD"})
 
 
 # ---- 静态前端（极简 HTML） ----

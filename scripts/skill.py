@@ -375,6 +375,43 @@ def route(action: str, raw: str | None) -> int:
             return _fail(missing_param("path"))
         return _wrap(lambda: service.fs_archive(args["path"]))
 
+    if a == "fs.init":
+        return _wrap(lambda: service.fs_init())
+
+    if a == "fs.list_top_dirs":
+        return _wrap(lambda: service.fs_list_top_dirs())
+
+    if a == "fs.bind_course":
+        for need in ("top_kind", "dirname", "course_id"):
+            if need not in args:
+                return _fail(missing_param(need))
+        return _wrap(lambda: service.fs_bind_course(
+            args["top_kind"], args["dirname"], args["course_id"]
+        ))
+
+    if a == "fs.unbind_course":
+        if "id" not in args:
+            return _fail(missing_param("id"))
+        return _wrap(lambda: service.fs_unbind_course(args["id"]))
+
+    if a == "fs.scan_course":
+        if "course_id" not in args:
+            return _fail(missing_param("course_id"))
+        return _wrap(lambda: service.fs_scan_course(args["course_id"]))
+
+    if a == "fs.scan_top_dir":
+        for need in ("top_kind", "dirname"):
+            if need not in args:
+                return _fail(missing_param(need))
+        return _wrap(lambda: service.fs_scan_top_dir(args["top_kind"], args["dirname"]))
+
+    if a == "course.list_files":
+        if "course_id" not in args:
+            return _fail(missing_param("course_id"))
+        return _wrap(lambda: service.course_list_files(
+            args["course_id"], role=args.get("role")
+        ))
+
     if a == "fs.read_file":
         for need in ("course_id", "role", "filename"):
             if need not in args:

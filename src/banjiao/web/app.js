@@ -1,7 +1,7 @@
 // 极简只读视图：调用 /api/* 拉数据展示，不做重型编辑。
 
-async function fetchJson(url) {
-  const r = await fetch(url);
+async function fetchJson(url, opts = {}) {
+  const r = await fetch(url, opts);
   if (!r.ok) {
     const t = await r.text();
     throw new Error(t || r.statusText);
@@ -29,6 +29,9 @@ function setView(tab) {
   if (tab === "homework") loadHomework();
   if (tab === "affairs") loadAffairs();
   if (tab === "progress") loadProgress();
+  if (tab === "outline") loadOutline();
+  if (tab === "files") loadFiles();
+  if (tab === "schedule") loadSchedule();
 }
 
 async function loadHealth() {
@@ -238,6 +241,201 @@ document.querySelectorAll("nav button").forEach((b) => {
 });
 document.getElementById("hw-only-pending").addEventListener("change", loadHomework);
 document.getElementById("progress-course-filter").addEventListener("change", loadProgress);
+
+// ============== 大纲 Tab ==============
+
+async function _populateCourseFilter(selId) {
+  const sel = document.getElementById(selId);
+  if (!sel || sel.options.length > 1) return;
+  try {
+    const list = await fetchJson("/api/courses");
+    for (const c of list) {
+      const opt = document.createElement("option");
+      opt.value = c.id;
+      opt.textContent = c.name + (c.class_group ? ` (${c.class_group})` : "");
+      sel.appendChild(opt);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function loadOutline() {
+  await _populateCourseFilter("outline-course-filter");
+  const sel = document.getElementById("outline-course-filter");
+  const cid = sel.value;
+  const dateInput = document.getElementById("outline-target-date");
+  if (!dateInput.value) dateInput.value = new Date().toISOString().slice(0, 10);
+
+  document.getElementById("outline-status").textContent = "";
+  document.getElementById("outline-next-topic").innerHTML = "";
+  document.getElementById("outline-text").innerHTML = "";
+  document.getElementById("outline-cache").innerHTML = "";
+
+  if (!cid) {
+    document.getElementById("outline-status").textContent = "请选择课程";
+    return;
+  }
+  try {
+    const o = await fetchJson(`/api/courses/${cid}/outline`);
+    const status = document.getElementById("outline-status");
+    status.classList.remove("warn", "ok");
+    let statusMsg = "";
+    if (!o.has_file) statusMsg += "📄 大纲文件不存在 · ";
+    else statusMsg += `📄 文件 ${o.file_size}B · `;
+    if (!o.cache_present) statusMsg += "❓ 尚未解析";
+    else if (o.stale) {
+      statusMsg += "⚠️ cache 已过期（文件 mtime 变化）";
+      status.classList.add("warn");
+    } else {
+      statusMsg += "✓ cache 同步";
+      status.classList.add("ok");
+    }
+    status.textContent = statusMsg;
+
+    document.getElementById("outline-text").innerHTML =
+      o.text
+        ? `<pre class="outline-text">${escapeHtml(o.text)}</pre>`
+        : `<div class="empty">无文本</div>`;
+    document.getElementById("outline-cache").innerHTML =
+      o.cached
+        ? `<pre class="outline-cache">${escapeHtml(JSON.stringify(o.cached, null, 2))}</pre>`
+        : `<div class="empty">尚未缓存（调 course.refresh_outline 回填）</div>`;
+
+    await computeNextTopic();
+  } catch (e) {
+    document.getElementById("outline-status").textContent = "加载失败：" + e.message;
+  }
+}
+
+async function computeNextTopic() {
+  const cid = document.getElementById("outline-course-filter").value;
+  const td = document.getElementById("outline-target-date").value;
+  const box = document.getElementById("outline-next-topic");
+  if (!cid) { box.innerHTML = ""; return; }
+  try {
+    const url = `/api/courses/${cid}/next-topic` + (td ? `?target_date=${td}` : "");
+    const r = await fetchJson(url);
+    box.innerHTML = `
+      <div class="nt-row"><span class="nt-label">目标日期</span><span class="nt-value">${r.target_date}${r.lesson_date ? " （当周有课：" + r.lesson_date + "）" : " （本节无课程）"}</span></div>
+      <div class="nt-row"><span class="nt-label">大纲周次</span><span class="nt-value">第 ${r.target_week ?? "?"} 周</span></div>
+      <div class="nt-row"><span class="nt-label">已讲到</span><span class="nt-value">第 ${r.current_week ?? "未开讲"} 周${r.recent_lesson_date ? "（"+r.recent_lesson_date+"）" : ""}</span></div>
+      <div class="nt-row"><span class="nt-label">最近主题</span><span class="nt-value">${r.recent_topic ?? "—"}</span></div>
+      <div class="nt-row"><span class="nt-label">大纲主题</span><span class="nt-value">${escapeHtml(r.outline_target ?? "（大纲无对应周次）")}</span></div>
+      <div class="nt-row"><span class="nt-label">差距（周）</span><span class="nt-value">${r.lag_weeks}</span></div>
+      <div class="nt-hint ${r.lag_weeks > 0 ? "warn" : ""}">${escapeHtml(r.hint)}</div>
+    `;
+  } catch (e) {
+    box.innerHTML = `<div class="empty">算失败：${e.message}</div>`;
+  }
+}
+
+document.getElementById("outline-course-filter").addEventListener("change", loadOutline);
+document.getElementById("outline-recompute").addEventListener("click", computeNextTopic);
+document.getElementById("outline-target-date").addEventListener("change", computeNextTopic);
+
+// ============== 文件 Tab ==============
+
+async function loadFiles() {
+  await _populateCourseFilter("files-course-filter");
+  const cid = document.getElementById("files-course-filter").value;
+  const role = document.getElementById("files-role-filter").value;
+  const root = document.getElementById("files-list");
+  root.innerHTML = "";
+  if (!cid) {
+    root.appendChild(el("div", { className: "empty" }, "请选择课程"));
+    return;
+  }
+  try {
+    // 先扫一遍（保证最新）
+    await fetchJson("/api/fs/scan-course", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ course_id: cid }) }).catch(() => {});
+    const url = `/api/courses/${cid}/files` + (role ? `?role=${role}` : "");
+    const list = await fetchJson(url);
+    if (!list.length) {
+      root.appendChild(el("div", { className: "empty" }, "此课程暂无文件（教师将文件放入绑定的文件夹后，点"重新扫描"）"));
+      return;
+    }
+    // 按 role 分组
+    const byRole = {};
+    for (const f of list) {
+      const r = f.role || "(无角色)";
+      if (!byRole[r]) byRole[r] = [];
+      byRole[r].push(f);
+    }
+    const tree = el("div", { className: "files-tree" });
+    for (const r of Object.keys(byRole).sort()) {
+      tree.appendChild(el("div", { className: "role-header" }, r));
+      for (const f of byRole[r]) {
+        tree.appendChild(el("div", { className: "file" },
+          el("span", { className: "name" }, f.filename),
+          el("span", { className: "meta" }, `${f.size}B · sha ${(f.sha256 || "").slice(0, 10)}…`),
+        ));
+      }
+    }
+    root.appendChild(tree);
+  } catch (e) {
+    root.appendChild(el("div", { className: "empty" }, "加载失败：" + e.message));
+  }
+}
+
+document.getElementById("files-course-filter").addEventListener("change", loadFiles);
+document.getElementById("files-role-filter").addEventListener("change", loadFiles);
+document.getElementById("files-refresh").addEventListener("click", async () => {
+  const cid = document.getElementById("files-course-filter").value;
+  if (!cid) return;
+  try {
+    await fetchJson("/api/fs/scan-course", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ course_id: cid }) });
+    loadFiles();
+  } catch (e) {
+    alert("扫描失败：" + e.message);
+  }
+});
+
+// ============== 时间表 Tab ==============
+
+async function loadSchedule() {
+  const root = document.getElementById("schedule-grid");
+  root.innerHTML = "";
+  try {
+    const sch = await fetchJson("/api/school/schedule");
+    root.appendChild(el("div", { className: "head" }, ""));
+    root.appendChild(el("div", { className: "head" }, "早晨"));
+    root.appendChild(el("div", { className: "head" }, "下午"));
+    root.appendChild(el("div", { className: "head" }, "晚上"));
+    const buckets = ["morning", "afternoon", "evening"];
+    // 按 max(morning/afternoon/evening length) 决定行数
+    const maxLen = Math.max(...buckets.map((b) => (sch[b] || []).length));
+    for (let i = 0; i < maxLen; i++) {
+      root.appendChild(el("div", { className: "row-label" }, `第 ${i + 1} 节`));
+      for (const b of buckets) {
+        const items = sch[b] || [];
+        const it = items[i];
+        if (it) {
+          root.appendChild(el("div", { className: "slot" },
+            el("span", { className: "no" }, "第 " + it.no + " 节"),
+            el("span", { className: "time" }, it.start + " ~ " + it.end),
+          ));
+        } else {
+          root.appendChild(el("div", { className: "slot no" }, "—"));
+        }
+      }
+    }
+  } catch (e) {
+    root.appendChild(el("div", { className: "empty" }, "加载失败：" + e.message));
+  }
+}
+
+// ============== 工具 ==============
+
+function escapeHtml(s) {
+  if (s === null || s === undefined) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 loadHealth();
 loadToday();
