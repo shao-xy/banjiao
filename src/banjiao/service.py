@@ -873,3 +873,191 @@ def course_apply_period(course_id: str) -> Course:
     c.updated_at = datetime.now()
     db.update_course(c)
     return c
+
+
+# ============== 阶段 ③：文件读写 + 历史 + 文本写入 ==============
+
+import base64 as _base64
+
+# 文本后缀（read 时直接返回字符串；二进制后缀 → base64）
+_TEXT_EXTS = frozenset({".md", ".txt", ".csv"})
+# 二进制后缀（write_text 拒绝）
+_BINARY_EXTS = frozenset({".pdf", ".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx",
+                          ".png", ".jpg", ".jpeg", ".gif", ".webp", ".zip"})
+# 单文件大小硬上限（读取与写入均生效）
+_MAX_FILE_BYTES = 20 * 1024 * 1024
+
+
+def _set_max_file_bytes(n: int) -> None:
+    """仅供测试调用的临时阈值切换。生产代码不应使用。"""
+    global _MAX_FILE_BYTES
+    _MAX_FILE_BYTES = n
+
+
+def _resolve_course_file(course_id: str, role: str, filename: str) -> tuple[_Path, str]:
+    """根据 (course_id, role, filename) 解析为 (绝对路径, path_rel)。
+
+    课程必须存在；role 必须是 7 个固定枚举之一；filename 经 _safe_path 兜底安全。
+    role 同时接受中文（"大纲"）和英文枚举（"outline"）。
+    """
+    zh_set = set(ROLE_DIRS.values())
+    en_set = set(ROLE_DIRS.keys())
+    if role in zh_set:
+        role_zh = role
+    elif role in en_set:
+        role_zh = ROLE_DIRS[role]
+    else:
+        raise bad_param("role", f"必须为 7 个固定角色之一：{sorted(zh_set)} 或 {sorted(en_set)}")
+    c = get_course(course_id)
+    bind = db.get_binding_by_course(course_id)
+    if bind is None:
+        raise not_found("课程绑定", f"课程 {course_id} 尚未绑定到任何文件夹")
+    rel = f"{bind.top_kind}/{bind.dirname}/{role_zh}/{filename}"
+    full = _safe_path(rel)
+    return full, rel
+
+
+def fs_read_file(course_id: str, role: str, filename: str) -> dict:
+    """读取课程某个角色下的一个文件。
+
+    - 文本后缀（.md/.txt/.csv）→ 返回 content 字符串 + encoding='utf-8'
+    - 二进制后缀 → 返回 content_base64 + encoding='base64' + size
+    - > 20MB → 拒绝（鼓励走归档/向量分块）
+    - 文件不存在 → not_found
+
+    返回字段：{course_id, role, path, filename, size, sha256, mtime_ns,
+               encoding: 'utf-8'|'base64', content / content_base64}
+    """
+    if not filename:
+        raise bad_param("filename", "不能为空")
+    full, rel = _resolve_course_file(course_id, role, filename)
+    if not full.exists() or not full.is_file():
+        raise not_found("文件", rel)
+    size = full.stat().st_size
+    if size > _MAX_FILE_BYTES:
+        raise SkillError(
+            "file_too_large",
+            f"{rel} 大小 {size}B 超过 20MB 上限",
+            status=413,
+            hint="大文件请用 fs.archive 备份后单独分发，不要全量灌给 LLM。",
+            extra={"size": size, "max": _MAX_FILE_BYTES},
+        )
+    # 同步数据库（mtime 变了再重算 sha）
+    bind = db.get_binding_by_course(course_id)
+    role_key = DIR_TO_ROLE[full.parent.name]
+    cf = _scan_file_record(rel, course_id, bind.top_kind, role_key)
+    out = {
+        "course_id": course_id,
+        "role": role_key,
+        "path": rel,
+        "filename": full.name,
+        "size": size,
+        "sha256": cf.sha256 if cf else _sha256_file(full),
+        "mtime_ns": full.stat().st_mtime_ns,
+    }
+    if full.suffix.lower() in _TEXT_EXTS:
+        try:
+            text = full.read_text(encoding="utf-8")
+        except UnicodeDecodeError as e:
+            raise SkillError(
+                "decode_error",
+                f"{rel} 不是有效 UTF-8 文本：{e}",
+                status=422,
+                hint="二进制文件请改用二进制读取（自动本任务）。",
+            )
+        out["encoding"] = "utf-8"
+        out["content"] = text
+    else:
+        out["encoding"] = "base64"
+        out["content_base64"] = _base64.b64encode(full.read_bytes()).decode("ascii")
+    return out
+
+
+def fs_file_history(course_id: str, role: str, filename: str) -> dict:
+    """列出该文件所有版本（当前 + 历史）。
+
+    返回：
+        {course_id, role, filename, current: {...}|None,
+         history: [{sha256, size, mtime_ns, created_at, superseded_at, replaced_by}, ...]}
+    """
+    if not filename:
+        raise bad_param("filename", "不能为空")
+    full, rel = _resolve_course_file(course_id, role, filename)
+    bind = db.get_binding_by_course(course_id)
+    role_key = DIR_TO_ROLE[full.parent.name]
+    # 先扫描保证 current 行存在
+    _scan_file_record(rel, course_id, bind.top_kind, role_key)
+    rows = db.list_history(rel)
+    current = next((r for r in rows if r.is_current), None)
+    history = [
+        {
+            "sha256": r.sha256,
+            "size": r.size,
+            "mtime_ns": r.mtime_ns,
+            "created_at": r.created_at.isoformat(timespec="seconds"),
+            "superseded_at": r.superseded_at.isoformat(timespec="seconds") if r.superseded_at else None,
+            "replaced_by": r.replaced_by,
+            "is_current": r.is_current,
+        }
+        for r in rows
+    ]
+    return {
+        "course_id": course_id,
+        "role": role_key,
+        "filename": full.name,
+        "path": rel,
+        "current": (
+            {
+                "sha256": current.sha256,
+                "size": current.size,
+                "mtime_ns": current.mtime_ns,
+                "created_at": current.created_at.isoformat(timespec="seconds"),
+            }
+            if current else None
+        ),
+        "history": history,
+        "versions": len(history),
+    }
+
+
+def fs_write_text(course_id: str, role: str, filename: str, text: str) -> dict:
+    """向课程某个角色写入**文本**文件（硬覆盖）。
+
+    - 二进制后缀一律拒绝（避免 LLM 误传 base64 当文本）
+    - 文本大小上限同 read（20MB）
+    - 写入前自动触发增量扫描（旧 sha 进 history，新 sha 变 current）
+    - 文件所在目录不存在则自动创建
+    """
+    if not filename:
+        raise bad_param("filename", "不能为空")
+    if not isinstance(text, str):
+        raise bad_param("text", "必须为字符串")
+    if len(text.encode("utf-8")) > _MAX_FILE_BYTES:
+        raise SkillError(
+            "file_too_large",
+            f"写入文本 {len(text)} 字符超过 20MB 编码上限",
+            status=413,
+            extra={"size": len(text.encode("utf-8")), "max": _MAX_FILE_BYTES},
+        )
+    full, rel = _resolve_course_file(course_id, role, filename)
+    if full.suffix.lower() in _BINARY_EXTS:
+        raise bad_param(
+            "filename",
+            f"{full.suffix} 是二进制后缀，不允许 fs.write_text 覆盖；如需替换请用操作系统",
+        )
+    full.parent.mkdir(parents=True, exist_ok=True)
+    full.write_text(text, encoding="utf-8")
+    # 同步数据库（upsert_file_current 会把旧 current 改 history）
+    bind = db.get_binding_by_course(course_id)
+    role_key = DIR_TO_ROLE[full.parent.name]
+    cf = _scan_file_record(rel, course_id, bind.top_kind, role_key)
+    return {
+        "written": True,
+        "course_id": course_id,
+        "role": role_key,
+        "path": rel,
+        "filename": full.name,
+        "size": full.stat().st_size,
+        "sha256": cf.sha256 if cf else _sha256_file(full),
+        "mtime_ns": full.stat().st_mtime_ns,
+    }

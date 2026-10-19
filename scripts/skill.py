@@ -39,13 +39,31 @@ Actions（全部不区分大小写）：
     affair.delete       --json '{"id":"..."}'
     affair.mark_reminded --json '{"id":"..."}'
 
-    # 文档 / 向量
+    # ===== 文档 / 向量 =====
     doc.list
     doc.add_text        --json '{"title":"...","text":"...","path":"relative/path.md","course_id":"..."}'
     doc.add_file        --json '{"title":"...","rel_path":"outline.md"}'
     doc.remove          --json '{"id":"..."}'
     vec.search          --json '{"query":"向量检索关键词","top_k":5}'
     vec.stats
+
+    # ===== 文件系统（阶段 ①-③） =====
+    fs.init
+    fs.list_top_dirs
+    fs.bind_course      --json '{"top_kind":"教学","dirname":"数学分析","course_id":"..."}'
+    fs.unbind_course    --json '{"id":"<binding_id>"}'
+    fs.scan_course      --json '{"course_id":"..."}'
+    fs.scan_top_dir     --json '{"top_kind":"教学","dirname":"数学分析"}'
+    course.list_files   --json '{"course_id":"...","role":"slides"}'
+    fs.archive          --json '{"path":"教学/数学分析/幻灯片/ch1.pptx"}'
+    fs.read_file        --json '{"course_id":"...","role":"slides","filename":"ch1.pptx"}'
+    fs.file_history     --json '{"course_id":"...","role":"outline","filename":"outline.md"}'
+    fs.write_text       --json '{"course_id":"...","role":"outline","filename":"outline.md","text":"# 第1章..."}'
+
+    # ===== 学校课程时间表 + 节次 =====
+    school.get_schedule
+    school.set_schedule --json '{"schedule":{"morning":[{...}],"afternoon":[],"evening":[]}}'
+    course.apply_period --json '{"id":"<course_id>"}'
 
 通用约定：
 - 日期：字符串 "YYYY-MM-DD"
@@ -326,6 +344,26 @@ def route(action: str, raw: str | None) -> int:
             return _fail(missing_param("path"))
         return _wrap(lambda: service.fs_archive(args["path"]))
 
+    if a == "fs.read_file":
+        for need in ("course_id", "role", "filename"):
+            if need not in args:
+                return _fail(missing_param(need))
+        return _wrap(lambda: service.fs_read_file(args["course_id"], args["role"], args["filename"]))
+
+    if a == "fs.file_history":
+        for need in ("course_id", "role", "filename"):
+            if need not in args:
+                return _fail(missing_param(need))
+        return _wrap(lambda: service.fs_file_history(args["course_id"], args["role"], args["filename"]))
+
+    if a == "fs.write_text":
+        for need in ("course_id", "role", "filename", "text"):
+            if need not in args:
+                return _fail(missing_param(need))
+        return _wrap(lambda: service.fs_write_text(
+            args["course_id"], args["role"], args["filename"], args["text"]
+        ))
+
     # ===== 兜底 =====
     return _fail(SkillError(
         "unknown_action",
@@ -367,7 +405,7 @@ HELP_TEXT = """伴教 Skill · LLM 入口脚本
   doc.list / doc.add_text / doc.add_file / doc.remove
   vec.search / vec.stats
   school.get_schedule / school.set_schedule
-  fs.archive
+  fs.archive / fs.read_file / fs.file_history / fs.write_text
 """
 
 
