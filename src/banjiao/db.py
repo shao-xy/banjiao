@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS courses (
     start_time      TEXT,
     end_time        TEXT,
     weekday         INTEGER,
+    week_pattern    TEXT NOT NULL DEFAULT 'all',
     weeks           TEXT NOT NULL DEFAULT '[]',
+    period_no       INTEGER,
     notes           TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
@@ -229,9 +231,9 @@ class DB:
     def create_course(self, c: Course) -> Course:
         self._mutate(
             "INSERT INTO courses (id,name,class_group,location,semester_start,semester_end,"
-            "start_time,end_time,weekday,weeks,notes,created_at,updated_at) "
+            "start_time,end_time,weekday,week_pattern,weeks,period_no,notes,created_at,updated_at) "
             "VALUES (:id,:name,:class_group,:location,:semester_start,:semester_end,"
-            ":start_time,:end_time,:weekday,:weeks,:notes,:created_at,:updated_at)",
+            ":start_time,:end_time,:weekday,:week_pattern,:weeks,:period_no,:notes,:created_at,:updated_at)",
             _course_row(c),
         )
         return c
@@ -250,7 +252,8 @@ class DB:
         self._mutate(
             "UPDATE courses SET name=:name, class_group=:class_group, location=:location, "
             "semester_start=:semester_start, semester_end=:semester_end, "
-            "start_time=:start_time, end_time=:end_time, weekday=:weekday, weeks=:weeks, "
+            "start_time=:start_time, end_time=:end_time, weekday=:weekday, "
+            "week_pattern=:week_pattern, weeks=:weeks, period_no=:period_no, "
             "notes=:notes, updated_at=:updated_at WHERE id=:id",
             _course_row(c),
         )

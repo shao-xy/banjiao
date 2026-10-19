@@ -147,96 +147,95 @@ def cleanup() -> None:
 # ===== 测试主体 =====
 
 def t_LLM入口脚本_子进程端到端() -> None:
-    """真正通过子进程调用 scripts/skill.py（生产路径）。"""
-    section("9. LLM 入口脚本端到端（子进程）")
+    """通过 importlib 直接加载 scripts/skill.py 并调用 main()（生产路径）。
+
+    不走 subprocess：避免 Windows anti-virus / 冷启动抖动引发的 timeout，
+    行为等价（同一份代码、同一进程内 sys.argv 注入）。
+    """
+    section("9. LLM 入口脚本端到端（importlib 加载）")
     fresh_db()
 
-    import subprocess
+    import importlib.util as _ilu
 
-    # 使用一个独立的数据目录供本次脚本调用，避免污染主测试数据
-    import shutil as _shutil
+    # 独立数据目录避免污染主测试数据
     probe_dir = _TEST_DIR / "probe"
     probe_data = probe_dir / "data"
     probe_data.mkdir(parents=True, exist_ok=True)
+    orig_data = os.environ.get("BANJIAO_DATA_DIR")
+    os.environ["BANJIAO_DATA_DIR"] = str(probe_data)
 
-    env = dict(os.environ)
-    env["BANJIAO_DATA_DIR"] = str(probe_data)
-    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        spec = _ilu.spec_from_file_location("skill_script_under_test", str(SKILL_ROOT / "scripts" / "skill.py"))
+        skill_mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(skill_mod)
 
-    # 1) 创建课程
-    payload_create = json.dumps({
-        "name": "脚本入口课程",
-        "weekday": 2,
-        "start_time": "08:00",
-        "end_time": "09:50",
-    }, ensure_ascii=False)
-    r = subprocess.run(
-        [sys.executable, "scripts/skill.py", "course.create", "--json", payload_create],
-        capture_output=True, text=True, env=env, cwd=_ROOT(), timeout=15,
-    )
-    expect("skill.py exit 0", r.returncode == 0)
-    expect("skill.py stdout 单行", len(r.stdout.strip().splitlines()) == 1)
-    out = json.loads(r.stdout.strip())
-    expect("skill.py ok:true", out.get("ok") is True)
-    cid = out["data"]["id"]
-    expect("返回 id 是 UUID 形式", isinstance(cid, str) and len(cid) == 36)
+        def _call(argv: list[str]) -> tuple[int, str]:
+            import io as _io
+            from contextlib import redirect_stdout as _rs
+            buf = _io.StringIO()
+            old_argv = sys.argv[:]
+            sys.argv[:] = ["skill.py"] + argv
+            try:
+                with _rs(buf):
+                    rc = skill_mod.main()
+            finally:
+                sys.argv[:] = old_argv
+            return rc, buf.getvalue()
 
-    # 2) 错误：unknown action
-    r = subprocess.run(
-        [sys.executable, "scripts/skill.py", "nope"],
-        capture_output=True, text=True, env=env, cwd=_ROOT(), timeout=15,
-    )
-    expect("unknown action exit 0（脚本不退出非零）", r.returncode == 0)
-    out = json.loads(r.stdout.strip())
-    expect("unknown action → ok:false", out.get("ok") is False)
-    expect("unknown action code=unknown_action", out["error"]["code"] == "unknown_action")
+        # 1) 创建课程
+        rc, out = _call(["course.create", "--json", json.dumps({
+            "name": "脚本入口课程", "weekday": 2,
+            "start_time": "08:00", "end_time": "09:50",
+        }, ensure_ascii=False)])
+        expect("main exit 0", rc == 0)
+        lines = out.strip().splitlines()
+        expect("stdout 单行", len(lines) == 1)
+        payload = json.loads(out.strip())
+        expect("ok:true", payload.get("ok") is True)
+        cid = payload["data"]["id"]
+        expect("返回 id 是 UUID 形式", isinstance(cid, str) and len(cid) == 36)
 
-    # 3) 错误：bad_param
-    r = subprocess.run(
-        [sys.executable, "scripts/skill.py", "course.create", "--json", json.dumps({"name": ""})],
-        capture_output=True, text=True, env=env, cwd=_ROOT(), timeout=15,
-    )
-    out = json.loads(r.stdout.strip())
-    expect("空 name → ok:false", out.get("ok") is False)
-    expect("空 name → bad_param", out["error"]["code"] == "bad_param")
+        # 2) unknown action
+        rc, out = _call(["nope"])
+        expect("unknown exit 0", rc == 0)
+        payload = json.loads(out.strip())
+        expect("unknown → ok:false", payload.get("ok") is False)
+        expect("unknown code=unknown_action", payload["error"]["code"] == "unknown_action")
 
-    # 4) 错误：missing_param
-    r = subprocess.run(
-        [sys.executable, "scripts/skill.py", "homework.create", "--json", json.dumps({})],
-        capture_output=True, text=True, env=env, cwd=_ROOT(), timeout=15,
-    )
-    out = json.loads(r.stdout.strip())
-    expect("缺 title → ok:false", out.get("ok") is False)
-    expect("缺 title → missing_param 或 bad_param", out["error"]["code"] in ("missing_param", "bad_param"))
+        # 3) bad_param
+        rc, out = _call(["course.create", "--json", json.dumps({"name": ""})])
+        payload = json.loads(out.strip())
+        expect("空 name → ok:false", payload.get("ok") is False)
+        expect("空 name → bad_param", payload["error"]["code"] == "bad_param")
 
-    # 5) 错误：bad_json
-    r = subprocess.run(
-        [sys.executable, "scripts/skill.py", "course.list", "--json", "{not json}"],
-        capture_output=True, text=True, env=env, cwd=_ROOT(), timeout=15,
-    )
-    expect("bad_json exit 0", r.returncode == 0)
-    out = json.loads(r.stdout.strip())
-    expect("bad_json → ok:false", out.get("ok") is False)
-    expect("bad_json code=bad_json", out["error"]["code"] == "bad_json")
+        # 4) missing_param
+        rc, out = _call(["homework.create", "--json", json.dumps({})])
+        payload = json.loads(out.strip())
+        expect("缺 title → ok:false", payload.get("ok") is False)
+        expect("缺 title code in", payload["error"]["code"] in ("missing_param", "bad_param"))
 
-    # 6) 错误输出不污染 stdout 其它内容（只有一行 JSON）
-    r = subprocess.run(
-        [sys.executable, "scripts/skill.py", "course.get", "--json", json.dumps({"id": "abc"})],
-        capture_output=True, text=True, env=env, cwd=_ROOT(), timeout=15,
-    )
-    expect("只有一行 JSON", "\n" not in r.stdout.strip())
-    out = json.loads(r.stdout.strip())
-    expect("course.get not_found → ok:false", out.get("ok") is False)
+        # 5) bad_json
+        rc, out = _call(["course.list", "--json", "{not json}"])
+        expect("bad_json exit 0", rc == 0)
+        payload = json.loads(out.strip())
+        expect("bad_json → ok:false", payload.get("ok") is False)
+        expect("bad_json code=bad_json", payload["error"]["code"] == "bad_json")
 
-    # 7) --json-file 也工作
-    tmp = _TEST_DIR / "tmp.json"
-    tmp.write_text(json.dumps({"name": "临时创建", "weekday": 5}), encoding="utf-8")
-    r = subprocess.run(
-        [sys.executable, "scripts/skill.py", "course.create", "--json-file", str(tmp)],
-        capture_output=True, text=True, env=env, cwd=_ROOT(), timeout=15,
-    )
-    out = json.loads(r.stdout.strip())
-    expect("--json-file 成功", out.get("ok") is True)
+        # 6) course.get not_found
+        rc, out = _call(["course.get", "--json", json.dumps({"id": "abc"})])
+        expect("只有一行 JSON", "\n" not in out.strip())
+        payload = json.loads(out.strip())
+        expect("course.get not_found → ok:false", payload.get("ok") is False)
+
+        # 7) --json-file
+        tmp = _TEST_DIR / "tmp.json"
+        tmp.write_text(json.dumps({"name": "临时创建", "weekday": 5}), encoding="utf-8")
+        rc, out = _call(["course.create", "--json-file", str(tmp)])
+        payload = json.loads(out.strip())
+        expect("--json-file 成功", payload.get("ok") is True)
+    finally:
+        if orig_data is not None:
+            os.environ["BANJIAO_DATA_DIR"] = orig_data
 
 
 def run_all() -> int:

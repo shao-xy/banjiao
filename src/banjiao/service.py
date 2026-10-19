@@ -7,6 +7,7 @@ LLM 入口脚本、FastAPI 路由都通过这里读写数据，保证两条路�
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
@@ -83,15 +84,23 @@ def _week_occurrences(course: Course, start: date, end: date) -> list[tuple[date
     """返回课程在 [start, end] 内的 (上课日, 第几周) 列表。
 
     - 无 weekday：返回空（一次性课程？用进度记录自行管理 lesson_date）。
-    - 有 weekday + 有 semester_start：按 weekday 计算周偏移，再用 weeks 列表过滤。
-      weeks 为 None / 空列表视为"不限定周次"，所有周均生效；非空列表才做命中判定。
+    - 有 weekday + 有 semester_start：按 weekday 计算周偏移。
+      然后用 week_pattern / weeks 过滤：
+        * "all"   → 所有周
+        * "odd"   → 仅奇数周
+        * "even"  → 仅偶数周
+        * "custom"→ 仅 weeks 列表里的周次
     - 有 weekday + 无 semester_start：按 weekday 推到 start-end 范围，周次固定为 1。
     """
     if course.weekday is None:
         return []
     weeks_filter: Optional[set[int]] = None
-    if course.weeks:
-        weeks_filter = set(course.weeks)
+    if course.week_pattern == "custom":
+        weeks_filter = set(course.weeks or [])
+    elif course.week_pattern == "odd":
+        weeks_filter = None  # 走下方奇偶逻辑
+    elif course.week_pattern == "even":
+        weeks_filter = None
     out: list[tuple[date, int]] = []
     cur = start
     while cur <= end:
@@ -105,8 +114,14 @@ def _week_occurrences(course: Course, start: date, end: date) -> list[tuple[date
                     cur += timedelta(days=1)
                     continue
                 week_no = delta_days // 7 + 1
-                if weeks_filter is not None and week_no not in weeks_filter:
+                # week_pattern 过滤
+                if course.week_pattern == "odd" and week_no % 2 == 0:
                     week_no = None
+                elif course.week_pattern == "even" and week_no % 2 == 1:
+                    week_no = None
+                elif course.week_pattern == "custom":
+                    if weeks_filter is not None and week_no not in weeks_filter:
+                        week_no = None
             if week_no is not None or course.semester_start is None:
                 out.append((cur, week_no if week_no is not None else 1))
         cur += timedelta(days=1)
@@ -653,6 +668,36 @@ def _dump_file(f: CourseFile) -> dict:
     }
 
 
+# ============== fs.archive（教师主动备份；同 backup 语义） ==============
+
+def fs_archive(path_rel: str) -> dict:
+    """把文件或文件夹"打快照"到 data/_archive/<时间戳>/...。
+
+    不删除原内容、不覆盖：
+        - 文件 → 拷一份 _archive_<时间戳>_<原名>
+        - 目录 → 整个复制到 _archive/<时间戳>_<dirname>/
+
+    设计意图：教师若担心覆盖错，先 archive 再写；可随时手工清理 _archive。
+    """
+    full = _safe_path(path_rel)
+    if not full.exists():
+        raise not_found("路径", path_rel)
+    archive_root = _data_root() / "_archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if full.is_file():
+        dst = archive_root / f"{ts}_{full.name}"
+        _shutil.copy2(full, dst)
+        rel_dst = str(dst.relative_to(_data_root())).replace("\\", "/")
+        return {"archived": True, "src": path_rel, "dst": rel_dst, "kind": "file"}
+    # directory
+    dst = archive_root / f"{ts}_{full.name}"
+    _shutil.copytree(full, dst)
+    rel_dst = str(dst.relative_to(_data_root())).replace("\\", "/")
+    n = sum(1 for _ in dst.rglob("*") if _.is_file())
+    return {"archived": True, "src": path_rel, "dst": rel_dst, "kind": "dir", "files": n}
+
+
 # ============== fs.delete（硬约束 confirm） ==============
 
 def fs_delete(path_rel: str, confirm: str | None = None) -> dict:
@@ -737,3 +782,94 @@ def fs_delete(path_rel: str, confirm: str | None = None) -> dict:
         "items_count": items_count,
         "course_files_rows_removed": cf_deleted,
     }
+
+
+# ============== 学校课程时间表 + 节次解析 ==============
+
+from .config import DEFAULT_SCHOOL_SCHEDULE
+
+_SCHEDULE_FILE = "_school_schedule.json"  # 写在 data/ 下
+
+
+def _schedule_path() -> _Path:
+    return _data_root() / _SCHEDULE_FILE
+
+
+def _validate_schedule(payload: dict) -> None:
+    """校验学校时间表格式。三个 key：morning/afternoon/evening，每个为 [{no, start, end}]。"""
+    if not isinstance(payload, dict):
+        raise bad_param("schedule", "必须为对象")
+    for bucket in ("morning", "afternoon", "evening"):
+        if bucket not in payload:
+            raise bad_param(bucket, "缺失")
+        items = payload[bucket]
+        if not isinstance(items, list):
+            raise bad_param(bucket, "必须为列表")
+        for it in items:
+            if not isinstance(it, dict):
+                raise bad_param(bucket, "每项必须为对象")
+            for k in ("no", "start", "end"):
+                if k not in it:
+                    raise bad_param(bucket, f"每项必须有 {k}")
+            if not isinstance(it["no"], int) or not (1 <= it["no"] <= 12):
+                raise bad_param(bucket, "no 必须为 1..12")
+            for tk in ("start", "end"):
+                if not isinstance(it[tk], str) or len(it[tk]) != 5 or it[tk][2] != ":":
+                    raise bad_param(bucket, f"{tk} 必须为 'HH:MM'")
+
+
+def school_get_schedule() -> dict:
+    """返回当前生效的学校课程时间表。优先 data/_school_schedule.json，否则默认。"""
+    p = _schedule_path()
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            _validate_schedule(data)
+            return data
+        except Exception:
+            pass  # 损坏就回退默认（绝不抛）
+    return DEFAULT_SCHOOL_SCHEDULE
+
+
+def school_set_schedule(schedule: dict) -> dict:
+    """覆盖学校课程时间表（落盘到 data/_school_schedule.json）。"""
+    _validate_schedule(schedule)
+    p = _schedule_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(schedule, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"updated": True, "path": str(p.relative_to(_data_root())).replace("\\", "/")}
+
+
+def period_resolve(period_no: int) -> dict | None:
+    """根据节次查学校时间表，返回 {no,start,end} 或 None。"""
+    if not isinstance(period_no, int) or not (1 <= period_no <= 12):
+        return None
+    sched = school_get_schedule()
+    for bucket in ("morning", "afternoon", "evening"):
+        for it in sched.get(bucket, []):
+            if it.get("no") == period_no:
+                return it if False else {"no": it["no"], "start": it["start"], "end": it["end"]}
+    return None
+
+
+def course_apply_period(course_id: str) -> Course:
+    """若 Course.period_no 有值且 start_time/end_time 为空，则从学校时间表填充。"""
+    c = get_course(course_id)
+    if c.period_no is None:
+        return c
+    if c.start_time is not None and c.end_time is not None:
+        return c  # 已显式填了，不覆盖
+    slot = period_resolve(c.period_no)
+    if slot is None:
+        raise SkillError(
+            "period_not_in_schedule",
+            f"节次 {c.period_no} 不在学校时间表中",
+            status=422,
+            hint="先调用 school.get_schedule 确认节次，或显式传 start_time/end_time 覆盖。",
+        )
+    from datetime import time as _time
+    c.start_time = _time(int(slot["start"][:2]), int(slot["start"][3:]))
+    c.end_time = _time(int(slot["end"][:2]), int(slot["end"][3:]))
+    c.updated_at = datetime.now()
+    db.update_course(c)
+    return c

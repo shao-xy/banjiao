@@ -48,8 +48,43 @@ class Recurrence(BaseModel):
 
 # ============== 课程 ==============
 
+# 周次模式：单双周 / 全周 / 自定义
+WeekPattern = Literal["all", "odd", "even", "custom"]
+
+
+def _validate_course_week_logic(week_pattern: Optional[str], weeks: Optional[list[int]]) -> None:
+    """统一校验 Course/CourseCreate/CourseUpdate 的周次字段组合。"""
+    if weeks is not None and (not all(1 <= w <= 60 for w in weeks)):
+        raise ValueError("weeks 元素必须在 1..60 之间")
+    if week_pattern == "custom" and not weeks:
+        raise ValueError("week_pattern='custom' 时必须提供 weeks 列表")
+    if week_pattern in ("odd", "even") and weeks:
+        raise ValueError("week_pattern 为 'odd'/'even' 时不应再传 weeks")
+
+
+def _coerce_week_pattern(week_pattern: Optional[str], weeks: Optional[list[int]]) -> str:
+    """老调用兼容：未传 week_pattern 但传了 weeks → 视为 'custom'；其它保持。"""
+    if week_pattern is not None:
+        return week_pattern
+    if weeks:
+        return "custom"
+    return "all"
+
+
 class Course(BaseModel):
-    """课程基本信息 + 周次表。"""
+    """课程基本信息 + 周次表。
+
+    周次模式（week_pattern）：
+        - "all"（默认）：整个学期每天都按 weekday 命中
+        - "odd"：仅奇数周
+        - "even"：仅偶数周
+        - "custom"：仅 weeks 列表里的周次
+
+    节次（period_no）：
+        1..12 对应学校第一节…第十一节（学校默认时间表可通过 school.get_schedule 查询）。
+        教师也可以不传 period_no，直接传 start_time / end_time 覆盖。
+        两者同时给时，period_no 仅用于查询提示，schedule 时间才是上课时间。
+    """
 
     id: str = Field(default_factory=_new_id)
     name: str = Field(min_length=1, max_length=100)
@@ -60,7 +95,9 @@ class Course(BaseModel):
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     weekday: Optional[int] = Field(default=None, ge=0, le=6)
+    week_pattern: WeekPattern = "all"
     weeks: Optional[list[int]] = None
+    period_no: Optional[int] = Field(default=None, ge=1, le=12)
     notes: Optional[str] = Field(default=None, max_length=2000)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
@@ -69,8 +106,10 @@ class Course(BaseModel):
     def _check(self):
         if self.start_time and self.end_time and self.end_time < self.start_time:
             raise ValueError("结束时间不能早于开始时间")
-        if self.weeks is not None and (not all(1 <= w <= 60 for w in self.weeks)):
-            raise ValueError("weeks 元素必须在 1..60 之间")
+        # 老调用兼容：weeks 有值而未显式传 week_pattern → 视为 custom
+        if self.week_pattern == "all" and self.weeks:
+            object.__setattr__(self, "week_pattern", "custom")
+        _validate_course_week_logic(self.week_pattern, self.weeks)
         if (
             self.semester_start is not None
             and self.semester_end is not None
@@ -89,15 +128,18 @@ class CourseCreate(BaseModel):
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     weekday: Optional[int] = Field(default=None, ge=0, le=6)
+    week_pattern: WeekPattern = "all"
     weeks: Optional[list[int]] = None
+    period_no: Optional[int] = Field(default=None, ge=1, le=12)
     notes: Optional[str] = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def _check(self):
         if self.start_time and self.end_time and self.end_time < self.start_time:
             raise ValueError("结束时间不能早于开始时间")
-        if self.weeks is not None and (not all(1 <= w <= 60 for w in self.weeks)):
-            raise ValueError("weeks 元素必须在 1..60 之间")
+        if self.week_pattern == "all" and self.weeks:
+            object.__setattr__(self, "week_pattern", "custom")
+        _validate_course_week_logic(self.week_pattern, self.weeks)
         if (
             self.semester_start is not None
             and self.semester_end is not None
@@ -116,21 +158,24 @@ class CourseUpdate(BaseModel):
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     weekday: Optional[int] = Field(default=None, ge=0, le=6)
+    week_pattern: Optional[WeekPattern] = None
     weeks: Optional[list[int]] = None
+    period_no: Optional[int] = Field(default=None, ge=1, le=12)
     notes: Optional[str] = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def _check(self):
         if self.start_time and self.end_time and self.end_time < self.start_time:
             raise ValueError("结束时间不能早于开始时间")
-        if self.weeks is not None and (not all(1 <= w <= 60 for w in self.weeks)):
-            raise ValueError("weeks 元素必须在 1..60 之间")
-        if (
-            self.semester_start is not None
-            and self.semester_end is not None
-            and self.semester_end < self.semester_start
-        ):
-            raise ValueError("semester_end 不能早于 semester_start")
+        # Update 时仅在 caller 同时给了两个字段时才做组合校验；
+        # 否则保持 None=不修改的单字段语义。
+        if self.week_pattern is not None and self.weeks is not None:
+            if self.week_pattern == "all" and self.weeks:
+                object.__setattr__(self, "week_pattern", "custom")
+            _validate_course_week_logic(self.week_pattern, self.weeks)
+        if self.semester_start is not None and self.semester_end is not None:
+            if self.semester_end < self.semester_start:
+                raise ValueError("semester_end 不能早于 semester_start")
         return self
 
 
@@ -290,7 +335,9 @@ class CoursePublic(BaseModel):
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     weekday: Optional[int] = None
+    week_pattern: str = "all"
     weeks: Optional[list[int]] = None
+    period_no: Optional[int] = None
     notes: Optional[str] = None
     created_at: datetime
     updated_at: datetime

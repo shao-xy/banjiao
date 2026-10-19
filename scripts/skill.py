@@ -167,6 +167,11 @@ def route(action: str, raw: str | None) -> int:
                 return _fail(bad_param("start", "应为 YYYY-MM-DD"))
         return _wrap(lambda: service.week_lessons(start))
 
+    if a == "course.apply_period":
+        if "id" not in args:
+            return _fail(missing_param("id"))
+        return _wrap(lambda: service.course_apply_period(args["id"]).model_dump(mode="json"))
+
     # ===== 进度 =====
     if a == "progress.list":
         return _wrap(lambda: [p.model_dump(mode="json") for p in service.list_progress(args.get("course_id"))])
@@ -308,6 +313,19 @@ def route(action: str, raw: str | None) -> int:
     if a == "vec.stats":
         return _wrap(lambda: vector_index.get_index().stats())
 
+    if a == "school.get_schedule":
+        return _wrap(lambda: service.school_get_schedule())
+
+    if a == "school.set_schedule":
+        if "schedule" not in args:
+            return _fail(missing_param("schedule", "请传 {morning,afternoon,evening:[{no,start,end}]}"))
+        return _wrap(lambda: service.school_set_schedule(args["schedule"]))
+
+    if a == "fs.archive":
+        if "path" not in args:
+            return _fail(missing_param("path"))
+        return _wrap(lambda: service.fs_archive(args["path"]))
+
     # ===== 兜底 =====
     return _fail(SkillError(
         "unknown_action",
@@ -342,12 +360,14 @@ HELP_TEXT = """伴教 Skill · LLM 入口脚本
     python scripts/skill.py vec.search --json '{\"query\":\"极限定义\",\"top_k\":3}'
 
 可用 action：
-  course.list / course.get / course.create / course.update / course.delete / course.today / course.week
+  course.list / course.get / course.create / course.update / course.delete / course.today / course.week / course.apply_period
   progress.list / progress.create / progress.update / progress.delete
   homework.list / homework.create / homework.update / homework.delete / homework.due_soon
   affair.list / affair.create / affair.update / affair.delete / affair.mark_reminded
   doc.list / doc.add_text / doc.add_file / doc.remove
   vec.search / vec.stats
+  school.get_schedule / school.set_schedule
+  fs.archive
 """
 
 
@@ -372,7 +392,13 @@ def main() -> int:
     else:
         json_payload = args.json
 
-    return route(args.action, json_payload)
+    try:
+        return route(args.action, json_payload)
+    except SkillError as e:
+        # main() 也兜底：route() 内部有 _fail 兜住绝大多数情况，
+        # 但少数直接 raise（如 _load_json_arg）需要在这里统一化。
+        _fail(e)
+        return 0
 
 
 if __name__ == "__main__":
