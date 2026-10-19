@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>伴教 · 教学事务</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>伴教</h1>
+    <nav>
+      <button data-tab="today" class="active">今日课程</button>
+      <button data-tab="week">本周</button>
+      <button data-tab="courses">课程</button>
+      <button data-tab="homework">作业</button>
+      <button data-tab="affairs">事务</button>
+      <button data-tab="progress">进度</button>
+    </nav>
+    <div class="vector-flag">向量检索：<span id="vec-flag">?</span></div>
+  </header>
+
+  <main>
+    <section id="view-today" class="view active">
+      <h2>今日课程</h2>
+      <div id="today-list" class="list"></div>
+    </section>
+
+    <section id="view-week" class="view">
+      <h2>本周课程</h2>
+      <div id="week-list" class="list"></div>
+    </section>
+
+    <section id="view-courses" class="view">
+      <h2>全部课程</h2>
+      <div id="courses-list" class="list"></div>
+      <p class="hint">课程的新增/编辑请通过对话与大模型完成。</p>
+    </section>
+
+    <section id="view-homework" class="view">
+      <h2>作业</h2>
+      <div class="toolbar">
+        <label><input type="checkbox" id="hw-only-pending" checked /> 仅待提交</label>
+      </div>
+      <div id="homework-list" class="list"></div>
+    </section>
+
+    <section id="view-affairs" class="view">
+      <h2>教学事务</h2>
+      <div id="affairs-list" class="list"></div>
+    </section>
+
+    <section id="view-progress" class="view">
+      <h2>课程进度</h2>
+      <select id="progress-course-filter"><option value="">全部课程</option></select>
+      <div id="progress-list" class="list"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span>只读可视化视图 · 数据修改请与大模型对话</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

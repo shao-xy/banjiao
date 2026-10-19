@@ -1,0 +1,118 @@
+:root {
+  --bg: #f7f3ee;
+  --fg: #2a2a2a;
+  --accent: #c5643a;
+  --card-bg: #fff;
+  --muted: #888;
+  --border: #e0d8cf;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+header {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+header h1 {
+  margin: 0;
+  color: var(--accent);
+  font-size: 22px;
+}
+
+nav { display: flex; gap: 6px; flex-wrap: wrap; }
+nav button {
+  border: 1px solid var(--border);
+  background: transparent;
+  padding: 6px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--fg);
+}
+nav button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.vector-flag {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+main {
+  max-width: 1100px;
+  margin: 24px auto;
+  padding: 0 16px;
+}
+
+.view { display: none; }
+.view.active { display: block; }
+
+h2 {
+  border-left: 4px solid var(--accent);
+  padding-left: 10px;
+  font-size: 18px;
+  margin: 16px 0;
+}
+
+.list { display: grid; gap: 10px; }
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.card .title { font-weight: 600; margin-bottom: 4px; }
+.card .meta { color: var(--muted); font-size: 13px; }
+.card .desc { font-size: 14px; margin-top: 6px; white-space: pre-wrap; }
+
+.toolbar { margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+
+.empty { text-align: center; color: var(--muted); padding: 40px; }
+
+.badge {
+  display: inline-block;
+  background: #fbeee5;
+  color: var(--accent);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  margin-right: 4px;
+}
+
+.badge.warn { background: #fde8e3; color: #b13b1c; }
+.badge.ok { background: #e6f3eb; color: #2c7a4b; }
+
+.hint { color: var(--muted); font-size: 13px; margin-top: 12px; }
+
+footer {
+  text-align: center;
+  padding: 20px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+select {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #fff;
+}

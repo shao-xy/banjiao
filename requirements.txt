@@ -1,0 +1,8 @@
+# 核心依赖（运行网页后端 + LLM 入口脚本）
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+pydantic-settings>=2.2
+
+# 可选：向量检索模块。默认关闭，未安装也不影响主功能。
+# sentence-transformers>=3.0

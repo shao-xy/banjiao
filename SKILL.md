@@ -1,0 +1,161 @@
+# 伴教 Skill（面向 AI Agent 的教学事务 Skill）
+
+> 单机、单教师、面向 AI Agent 的教学事务持久化 Skill。
+> 把"课表 / 作业 / 进度 / 事务"留在这里、把"写通知 / 出教案 / 出题目"留给大模型原生能力。
+
+---
+
+## 0. 形态约束（必须遵守）
+
+1. **后端不常驻**。网页 FastAPI 服务只在教师要"看一眼"时才临时启动，用 Ctrl-C 关闭。
+2. **数据写入通过 LLM 入口脚本** `scripts/skill.py` 直接落到 SQLite，**不依赖 HTTP 后端**。
+3. **Skill 只负责持久化与查询**：课程、进度、作业、教学事务（可选：向量检索）。
+4. **不属于 Skill**：教案生成、试卷、评语、通知文案……**全部交给大模型原生提示词能力**，不要在 Skill 中实现。
+
+---
+
+## 1. Skill 能力边界
+
+| 类别 | 是否属于 Skill |
+| --- | --- |
+| 持久化课程信息 / 课表（今日、本周） | ✅ |
+| 记录每节课程进度、与大纲对比 | ✅ |
+| 作业 CRUD + 到期提醒 | ✅ |
+| 教学事务 CRUD + 到点提醒 | ✅ |
+| 结构化查询（按周 / 按截止 / 按状态） | ✅ |
+| 教学文档向量索引与语义检索 | ✅（可选开关） |
+| 教案生成 / 试卷 / 评语 / 通知文案 | ❌（大模型原生） |
+| 多教师 / 多用户 / 权限 | ❌（明确不做） |
+| 后端常驻进程 / systemd 部署 | ❌（单机按需） |
+
+---
+
+## 2. 与上层 Agent（Host Runtime）交互
+
+Skill 对外**只输出结构化 JSON**，由上层 Agent 把 JSON 翻成自然语言回复教师。
+
+### 2.1 调用 Skill 修改数据
+
+大模型在对话中识别"教师想改数据"，通过子进程调用入口脚本：
+
+```bash
+python scripts/skill.py <action> --json '{...}'                # 短参
+python scripts/skill.py <action> --json-file path.json          # Windows 推荐（避免转义）
+echo '{...}' | python scripts/skill.py <action> --json @-       # stdin
+```
+
+stdout 是**一行 JSON**：
+
+```json
+{"ok": true, "data": {...}}                                                          # 成功
+{"ok": false, "error": {"code":"...","message":"...","status":N,"hint":"...","extra":{...}}}  # 失败
+```
+
+退出码恒为 0，**判断成败只看 `ok` 字段**。错误码语义：
+
+| code | 含义 | 处理建议 |
+| --- | --- | --- |
+| `bad_param` | 字段非法 | 看 `error.message` 修正参数 |
+| `missing_param` | 必填字段缺失 | 向用户询问后再次调用 |
+| `not_found` | id 不存在 | 调 list 类接口核对 |
+| `bad_json` | --json 无法解析 | 重传，注意 UTF-8 / 转义 |
+| `vector_disabled` | 向量检索未启用 | 见 §6 开启 |
+| `vector_unavailable` | 未装 sentence-transformers | 见 §6 |
+| `unknown_action` | action 拼错 | 查本文档 §4 |
+| `internal_error` | 未捕获异常 | 报告给用户 + 查日志 |
+
+### 2.2 查询
+
+```bash
+python scripts/skill.py course.today
+python scripts/skill.py course.week --json '{"start":"2026-10-20"}'
+python scripts/skill.py homework.due_soon
+python scripts/skill.py vec.search --json '{"query":"极限定义","top_k":3}'
+```
+
+### 2.3 提醒
+
+启动 `scripts/reminder_daemon.py`（可选），周期性扫描到期作业 / 事务，stdout 推送标准化 JSON：
+
+```json
+{"type":"homework.due","emitted_at":"2026-10-25T08:00:00","data":{...}}
+```
+
+上层 Agent 解析后**主动推送**给教师。
+
+### 2.4 文本创作类请求
+
+教师要求"帮我写一封周末答疑通知" → **不要调 Skill**，直接让大模型回答。
+
+---
+
+## 3. 数据存储
+
+- SQLite 单文件 `data/banjiao.db`（WAL 模式 + synchronous=FULL）
+- 启动时自动建表，无需迁移；字段若有新增，重启即可幂等补齐
+- 网页启动不写数据；写只通过 `scripts/skill.py` 或 API
+
+---
+
+## 4. Actions（完整列表）
+
+| action | 参数要点 | 用途 |
+| --- | --- | --- |
+| `course.list` / `course.get` / `course.create` / `course.update` / `course.delete` | create 需要 `name`；其余最少传 `id` | 课程 CRUD |
+| `course.today` / `course.week` | 无参 / `start` | 当日 / 本周课表 |
+| `progress.list` / `progress.create` / `progress.update` / `progress.delete` | create 需要 `course_id, lesson_date, topic` | 课程进度 |
+| `homework.list` / `homework.create` / `homework.update` / `homework.delete` / `homework.due_soon` | create 需要 `title, published_at` | 作业 |
+| `affair.list` / `affair.create` / `affair.update` / `affair.delete` / `affair.mark_reminded` | create 需要 `title` | 教学事务 |
+| `doc.list` / `doc.add_text` / `doc.add_file` / `doc.remove` | 索引文档 | 教学文档入库 |
+| `vec.search` / `vec.stats` | `query`, `top_k` | 向量检索 |
+
+---
+
+## 5. 异常处理契约
+
+- 任何不存在的 `id` → 返回 `not_found` 错误，**绝不返回 200 + 空对象**。
+- 时间格式错（如 `start_time="25:00"`）→ Pydantic `bad_param`。
+- 参数缺失 → `missing_param` + `hint` 告诉上层 Agent 去问用户。
+- 内部异常 → `internal_error` 500，附 stack 不外泄。
+- 脚本退出码恒为 0；判断成败只看 stdout 中的 `ok` 字段。
+
+---
+
+## 6. 向量模块（可选）
+
+默认关闭。启用步骤：
+
+```bash
+# 1) 安装依赖
+pip install sentence-transformers
+
+# 2) 启用（项目根目录）
+echo BANJIAO_ENABLE_VECTOR=1 > .env
+
+# 3) 把大纲 / 课件放到 docs/ 目录（与 .py 同级）
+
+# 4) 调用 Skill 入库
+python scripts/skill.py doc.add_file --json '{"title":"高等数学大纲","rel_path":"calculus.md","course_id":"<课id>"}'
+
+# 5) 检索
+python scripts/skill.py vec.search --json '{"query":"极限的定义与性质","top_k":3}'
+```
+
+关闭：删除 `.env` 或 `BANJIAO_ENABLE_VECTOR=0`，重启后所有 `vec.*` action 返回 `vector_disabled`。
+
+---
+
+## 7. 本地运行提要
+
+```bash
+# 一次性安装（推荐虚拟环境）
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+
+# 改数据 → 直接和 Skill 对话（或手动 skill.py）
+# 看网页 → 执行 run_web.py，用完 Ctrl-C 关闭
+python run_web.py
+# → http://127.0.0.1:30826
+```
+
+详细使用见 [README.md](./README.md)。
