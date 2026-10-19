@@ -101,13 +101,48 @@ python scripts/skill.py vec.search --json '{"query":"极限定义","top_k":3}'
 
 | action | 参数要点 | 用途 |
 | --- | --- | --- |
-| `course.list` / `course.get` / `course.create` / `course.update` / `course.delete` | create 需要 `name`；其余最少传 `id` | 课程 CRUD |
-| `course.today` / `course.week` | 无参 / `start` | 当日 / 本周课表 |
+| `course.list` / `course.get` / `course.create` / `course.update` / `course.delete` | create 需要 `name`；其余最少传 `id` | 课程 CRUD（含 `week_pattern`、`period_no` 等周次/节次字段） |
+| `course.today` / `course.week` | 无参 / `start` | 当日 / 本周课表（按 `week_pattern` 过滤） |
+| `course.apply_period` | `id` | 用学校时间表把 `period_no` 填成 `start_time/end_time` |
+| `course.set_outline_path` | `id`, `filename` | 指定课程的大纲文件（必须落在"大纲"子目录里） |
+| `course.get_outline` | `id` | 大纲文件状态：`has_file` / `cache_present` / `stale` / `text` / `cached` |
+| `course.refresh_outline` | `id`, `parsed={weeks:[{week,topics}]}` | 大模型解析完大纲后回填缓存（Skill 不调 LLM） |
+| `course.next_topic` | `id`, `target_date?` | 事实卡：target_week / current_week / lag_weeks / outline_target / hint |
 | `progress.list` / `progress.create` / `progress.update` / `progress.delete` | create 需要 `course_id, lesson_date, topic` | 课程进度 |
 | `homework.list` / `homework.create` / `homework.update` / `homework.delete` / `homework.due_soon` | create 需要 `title, published_at` | 作业 |
 | `affair.list` / `affair.create` / `affair.update` / `affair.delete` / `affair.mark_reminded` | create 需要 `title` | 教学事务 |
+| `fs.init` / `fs.list_top_dirs` | 无参 | 初始化 / 列出 4 个顶层文件夹（含 binding 状态） |
+| `fs.bind_course` / `fs.unbind_course` | `top_kind`, `dirname`, `course_id` / `id` | 把顶层子目录绑定到课程 |
+| `fs.scan_course` / `fs.scan_top_dir` | `course_id` / `top_kind`, `dirname` | 增量扫描（mtime + sha256） |
+| `course.list_files` | `course_id`, `role?` | 列出当前文件（DB 缓存视图） |
+| `fs.archive` | `path` | 把文件/文件夹打快照到 `data/_archive/<ts>_*`（不删原内容） |
+| `fs.read_file` | `course_id`, `role`, `filename` | 读一个文件；文本返回 content，二进制返回 content_base64；>20MB 拒绝 |
+| `fs.file_history` | `course_id`, `role`, `filename` | 列出版本历史（current + superseded） |
+| `fs.write_text` | `course_id`, `role`, `filename`, `text` | 硬覆盖写文本；二进制后缀拒绝；自动同步 DB |
+| `fs.delete` | `path`, `confirm?` | 删除；含内容必须 `confirm="YES_DELETE_<sha8>"` |
+| `school.get_schedule` / `school.set_schedule` | `schedule={morning,afternoon,evening:[{no,start,end}]}` | 学校课程时间表（落盘 `data/_school_schedule.json`） |
 | `doc.list` / `doc.add_text` / `doc.add_file` / `doc.remove` | 索引文档 | 教学文档入库 |
 | `vec.search` / `vec.stats` | `query`, `top_k` | 向量检索 |
+
+### 4.1 课程周次与节次字段
+
+- `weekday` ∈ 0..6（周一=0）
+- `week_pattern` ∈ `all` / `odd` / `even` / `custom`；`custom` 必传 `weeks`
+- `weeks` 周次列表（1..60）；仅在 `week_pattern="custom"` 时生效
+- `period_no` ∈ 1..12；与学校时间表的节次对应
+- `start_time` / `end_time` 若空，可调 `course.apply_period` 从学校时间表填充
+
+### 4.2 文件系统角色（固定 7 个）
+
+`slides` / `lecture` / `material` / `homework` / `submission` / `reference` / `outline`
+
+分别对应中文文件夹名 `幻灯片` / `讲义` / `资料` / `作业` / `提交` / `进度参考` / `大纲`。教师在角色上的其它需求不由 Skill 管理。
+
+### 4.3 删除/备份硬约束
+
+- `fs.delete` 任何**有内容**的文件/目录，必须传 `confirm="YES_DELETE_<sha8>"`（sha8 在首次报错时返回）
+- `fs.archive` 永远不删原内容；只是复制到 `_archive/`
+- `fs.write_text` 二进制后缀（`.pdf/.pptx/.docx/...`）一律拒绝；改二进制请用操作系统
 
 ---
 

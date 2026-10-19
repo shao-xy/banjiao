@@ -76,7 +76,7 @@ python -m venv .venv
 
 依赖：
 
-- 必需：`fastapi`、`uvicorn`、`pydantic`、`pydantic-settings`
+- 必需：`fastapi`、`uvicorn`、`pydantic`（**不**需要 `pydantic-settings`——Skill 自写最小读取）
 - 可选：`sentence-transformers`（仅启用向量检索时需要）
 
 ---
@@ -85,11 +85,14 @@ python -m venv .venv
 
 ### 5.1 让 AI Agent 直接改数据
 
-模型对话中识别到教师想改课表 / 作业 / 事务 / 进度，**Agent 调用**：
+模型对话中识别到教师想改课表 / 作业 / 事务 / 进度 / 大纲，**Agent 调用**：
 
 ```powershell
-# 创建课程
-python scripts\skill.py course.create --json-file course.json
+# 创建课程（含单双周 + 学期 + 节次）
+python scripts\skill.py course.create --json '{"name":"高等数学","class_group":"2024-A","weekday":2,"semester_start":"2026-09-07","semester_end":"2027-01-10","week_pattern":"odd","start_time":"08:00","end_time":"09:50","period_no":1}'
+
+# 把学校第一节的 08:00-08:45 填到 start_time/end_time
+python scripts\skill.py course.apply_period --json '{"id":"<cid>"}'
 
 # 看今日课表
 python scripts\skill.py course.today
@@ -99,6 +102,25 @@ python scripts\skill.py homework.update --json '{"id":"<hid>","status":"submitte
 
 # 添加教研事务
 python scripts\skill.py affair.create --json '{"title":"教研会","kind":"meeting","due_at":"2026-10-20T15:00:00","remind_before_minutes":60}'
+
+# ============== 文件系统（每课独立目录） ==============
+# 1) 初始化 4 个顶层文件夹（教学/科研/事务/文件）
+python scripts\skill.py fs.init
+
+# 2) 把课程绑定到顶层子目录（必须先在文件系统里建好同名子目录）
+python scripts\skill.py fs.bind_course --json '{"top_kind":"教学","dirname":"高等数学","course_id":"<cid>"}'
+
+# 3) 增量扫描（mtime 不变 → 复用 sha256）
+python scripts\skill.py fs.scan_course --json '{"course_id":"<cid>"}'
+
+# 4) 读大纲（文本→字符串；其它→base64）
+python scripts\skill.py fs.read_file --json '{"course_id":"<cid>","role":"outline","filename":"outline.md"}'
+
+# 5) 大模型解析完大纲后回填 cache（Skill 不调 LLM）
+python scripts\skill.py course.refresh_outline --json '{"id":"<cid>","parsed":{"weeks":[{"week":1,"topics":["极限定义","极限运算"]}]}}'
+
+# 6) 算出"今天该讲哪"
+python scripts\skill.py course.next_topic --json '{"id":"<cid>","target_date":"2026-10-20"}'
 
 # 把大纲文件加入向量索引
 python scripts\skill.py doc.add_file --json '{"title":"高等数学大纲","rel_path":"calculus.md"}'
@@ -159,8 +181,8 @@ stdout 会持续输出 JSON 事件，如：
 # 1) 装依赖
 .venv\Scripts\python -m pip install sentence-transformers
 
-# 2) 在 Skill 根目录创建 .env
-"BANJIAO_ENABLE_VECTOR=1" | Out-File -Encoding ascii .env
+# 2) 设置环境变量（PowerShell 当前会话）
+$env:BANJIAO_ENABLE_VECTOR = "1"
 
 # 3) 把大纲 / 课件放进 docs/
 
@@ -171,40 +193,49 @@ python scripts\skill.py doc.add_file --json '{"title":"课程大纲","rel_path":
 python scripts\skill.py vec.search --json '{"query":"极限定义","top_k":3}'
 ```
 
-关闭：删除 `.env` 或 `BANJIAO_ENABLE_VECTOR=0`，重启后 `vec.*` action 返回 `vector_disabled`。
+关闭：`BANJIAO_ENABLE_VECTOR=0`（或取消设置）后 `vec.*` action 返回 `vector_disabled`。
+
+> 历史版本曾用过 `.env` 文件；当前实现**不读取** `.env`，全部走系统环境变量，避免冷启动延迟。
 
 ---
 
-## 6. 环境变量（.env 也支持）
+## 6. 环境变量（系统变量；不读 .env）
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `BANJIAO_HOST` | `127.0.0.1` | 网页监听地址 |
 | `BANJIAO_PORT` | `30826` | 网页监听端口 |
-| `BANJIAO_ENABLE_VECTOR` | `0` | 是否启用向量检索 |
+| `BANJIAO_DATA_DIR` | `SKILL_ROOT/data` | SQLite + 文件系统根目录（测试常用 `temp/banjiao_test_*` 隔离） |
+| `BANJIAO_FILES_DIR` | `SKILL_ROOT/files` | 预留：教师主动分发的资料根目录 |
+| `BANJIAO_VECTOR_DIR` | `SKILL_ROOT/vector_store` | 向量索引落盘目录 |
+| `BANJIAO_DOCS_DIR` | `SKILL_ROOT/docs` | 默认向量检索语料目录 |
+| `BANJIAO_ENABLE_VECTOR` | `0` | 是否启用向量检索（`1/true/yes/on` 视为开启） |
 | `BANJIAO_VECTOR_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | 嵌入模型 |
 
 ---
 
 ## 7. 测试
 
-`tests/test_edge.py` 提供 98 项生产安全边界 / 回归断言，覆盖：
+| 文件 | 数量 | 覆盖范围 |
+| --- | --- | --- |
+| [tests/test_edge.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/tests/test_edge.py) | 98 | 数据完整性（Pydantic 字段 / model_validator）；课程周次边界；作业与事务；提醒与时间判定；持久化与并发；SQL 注入；标准化错误；JSON 序列化；LLM 入口脚本端到端 |
+| [tests/test_fs_edge.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/tests/test_fs_edge.py) | 29 | 阶段① 文件系统骨架（路径约束 / 绑定 / 增量扫描 / 硬删确认） |
+| [tests/test_schedule_edge.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/tests/test_schedule_edge.py) | 40 | 阶段② 单双周/区间周 + 节次 + 学校课程时间表 + fs.archive |
+| [tests/test_fileio_edge.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/tests/test_fileio_edge.py) | 31 | 阶段③ 文件读写（read_file / write_text / 20MB 上限 / 二进制后缀拒绝 / 历史版本） |
+| [tests/test_outline_edge.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/tests/test_outline_edge.py) | 34 | 阶段④ 大纲读取/缓存/进度结合（next_topic 事实卡） |
 
-- 数据完整性（Pydantic 字段 / model_validator：长度 / 类型 / 范围 / 枚举 / 组合约束）
-- 课程周次（weeks=[]、学期间、空 weekday、start_time 倒置）
-- 作业与事务（含取消、submitted 重置、due vs published）
-- 提醒与时间判定（due_soon / overdue / reminded 幂等）
-- 持久化与并发（SQLite WAL + 事务隔离）
-- SQL 注入与危险字符（参数化 / Unicode / 长度截断）
-- 错误处理（标准化 JSON / 不泄露路径）
-- JSON 序列化（date / time / UUID / None round-trip）
-- LLM 入口脚本子进程端到端（exit 恒为 0、stdin / 文件两种）
+合计 **232 项断言**，本地全绿。
 
 ```powershell
-python -u tests/test_edge.py
+# 跑某一组
+python -u tests\test_edge.py
+python -u tests\test_fs_edge.py
+python -u tests\test_schedule_edge.py
+python -u tests\test_fileio_edge.py
+python -u tests\test_outline_edge.py
 ```
 
-输出彩色高亮 ✅ / ❌，打印 `通过 N / N` 或失败明细。
+输出彩色高亮 ✅ / ❌，打印 `通过 N / N` 或失败明细。所有测试都用 `BANJIAO_DATA_DIR` 隔离到 `temp/banjiao_test_*`，不污染默认 `data/`。
 
 ---
 
@@ -212,11 +243,12 @@ python -u tests/test_edge.py
 
 | 症状 | 排错 |
 | --- | --- |
-| `ModuleNotFoundError: pydantic_settings` | 没装依赖：`pip install -r requirements.txt` |
+| `ModuleNotFoundError: pydantic` | 没装依赖：`pip install -r requirements.txt` |
 | `unable to open database file` | 检查 CWD；SQLite 写入 `data/banjiao.db` 相对路径要求 CWD 是 Skill 根 |
 | `vector_disabled` | 没启用；见 §5.4 |
 | `vector_unavailable` | 没装 `sentence-transformers`；同上 |
 | 重复收到同一条提醒 | 进程重启会清空内存去重；如果想完全重发，update 把 `reminded` 改回 `false` |
+| 子进程 `course.create` 第一次很慢（>5s）| 本机 Python 冷启动抖动；连续调用后会稳定在毫秒级 |
 
 ---
 
