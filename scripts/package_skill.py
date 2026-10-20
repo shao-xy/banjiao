@@ -28,6 +28,37 @@ DEFAULT_OUTPUT_DIR = SKILL_ROOT / "dist"
 GITHUB_REPO = "shao-xy/banjiao"  # ← 改这里
 
 
+# 读取 .gitignore，把"被忽略的文件/目录"在打包时也跳过
+def _load_gitignore_patterns() -> list[str]:
+    gi = SKILL_ROOT / ".gitignore"
+    if not gi.exists():
+        return []
+    pats = []
+    for line in gi.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        pats.append(line)
+    return pats
+
+
+def _is_ignored(rel_path: str, patterns: list[str]) -> bool:
+    """简易 gitignore 匹配：只支持目录名 / 文件名 / 通配符结尾。"""
+    import fnmatch
+    parts = rel_path.replace("\\", "/").split("/")
+    for pat in patterns:
+        # 末尾 / 表示目录匹配
+        clean = pat.rstrip("/")
+        # 匹配任何路径组件
+        for p in parts:
+            if fnmatch.fnmatch(p, clean):
+                return True
+        # 匹配完整相对路径
+        if fnmatch.fnmatch(rel_path, clean):
+            return True
+    return False
+
+
 def package(output: Path, include_tests: bool, include_git: bool, version: str | None = None) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
@@ -37,9 +68,16 @@ def package(output: Path, include_tests: bool, include_git: bool, version: str |
     dirs_added = 0
 
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        # 加载 .gitignore 模式（被忽略的文件不进 zip）
+        gitignore_patterns = _load_gitignore_patterns()
+
         # 必须包含的核心
         must_have = ["SKILL.md", "README.md", "requirements.txt", "run_web.py", ".gitignore"]
+        # 敏感/本地备注：即使被加进 must_have 或后续被扫到也跳过（保险起见）
+        skip_files = {"NOTES-references.md"}
         for name in must_have:
+            if name in skip_files:
+                continue
             p = SKILL_ROOT / name
             if p.exists():
                 zf.write(p, arcname=f"banjiao/{name}")
@@ -57,6 +95,10 @@ def package(output: Path, include_tests: bool, include_git: bool, version: str |
                     continue
                 if p.suffix == ".pyc":
                     continue
+                # 跳过 .gitignore 中的文件/目录
+                rel = p.relative_to(SKILL_ROOT).as_posix()
+                if _is_ignored(rel, gitignore_patterns):
+                    continue
                 if p.is_file():
                     arcname = f"banjiao/{p.relative_to(SKILL_ROOT).as_posix()}"
                     zf.write(p, arcname=arcname)
@@ -73,10 +115,17 @@ def package(output: Path, include_tests: bool, include_git: bool, version: str |
                         continue
                     if p.suffix == ".pyc":
                         continue
+                    rel = p.relative_to(SKILL_ROOT).as_posix()
+                    if _is_ignored(rel, gitignore_patterns):
+                        continue
                     if p.is_file():
                         arcname = f"banjiao/{p.relative_to(SKILL_ROOT).as_posix()}"
                         zf.write(p, arcname=arcname)
                         files_added += 1
+
+        # 永远跳过本地笔记（即使被显式 rglob 扫到）
+        # （NOTES-references.md 在 .gitignore 里，本来就不会进 zip；这里再保险一次）
+        # 注：skip_files 已在 must_have 阶段用过
 
         if include_git:
             git = SKILL_ROOT / ".git"
