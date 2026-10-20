@@ -72,7 +72,7 @@ def package(output: Path, include_tests: bool, include_git: bool, version: str |
         gitignore_patterns = _load_gitignore_patterns()
 
         # 必须包含的核心
-        must_have = ["SKILL.md", "README.md", "requirements.txt", "run_web.py", ".gitignore"]
+        must_have = ["SKILL.md", "README.md", "LICENSE", "requirements.txt", "run_web.py", ".gitignore"]
         # 敏感/本地备注：即使被加进 must_have 或后续被扫到也跳过（保险起见）
         skip_files = {"NOTES-references.md"}
         for name in must_have:

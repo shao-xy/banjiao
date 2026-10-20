@@ -199,3 +199,15 @@ python run_web.py
 ```
 
 详细使用见 [README.md](./README.md)。
+
+---
+
+## 8. 开源协议
+
+本项目采用 **Apache License 2.0**。详见 [LICENSE](./LICENSE)。
+
+核心条款：
+- ✅ 允许商业使用、修改、再分发
+- ❗ 必须保留版权声明与 LICENSE
+- ❗ 修改文件需显著标记
+- ❌ 不得用作者名字背书衍生作品

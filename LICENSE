@@ -1,0 +1,42 @@
+Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   Copyright 2026 banjiao contributors
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+---
+
+附加说明（中文，仅作参考，权威文本见上方英文版）：
+
+本项目采用 Apache License 2.0 开源：
+
+✅ 允许：
+  - 商业使用
+  - 修改源码
+  - 再分发
+  - 在修改版本中使用你的署名
+  - 专利授权（贡献者授予使用者非歧视性的专利使用权）
+
+❗ 必须：
+  - 在所有副本 / 重要部分保留本 LICENSE 与版权声明
+  - 修改文件必须有显著标记
+  - 若含 NOTICE 文件，必须随分发保留
+
+❌ 不能：
+  - 用作者 / 贡献者的名字背书衍生作品（除非获得书面许可）
+  - 因使用本项目产生损害而要求作者负责
+
+⚠️ 贡献者按"现状"提供软件，不承担任何明示或暗示的担保责任。
+   详细条款见上方 Apache License 2.0 官方英文版。
