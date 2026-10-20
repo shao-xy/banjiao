@@ -80,86 +80,189 @@ def delete_course(course_id: str) -> Course:
     return c
 
 
+def _expand_weeks_range(weeks_range: Optional[list[int]], week_pattern: str) -> Optional[set[int]]:
+    """把 weeks_range=[起,止] + week_pattern 展开成具体的周次集合（B3）。
+
+    例：weeks_range=[1,7], week_pattern="odd" → {1,3,5,7}
+        weeks_range=[1,15], week_pattern="all" → {1..15}
+    """
+    if not weeks_range:
+        return None
+    lo, hi = weeks_range
+    if week_pattern == "odd":
+        return set(range(lo if lo % 2 == 1 else lo + 1, hi + 1, 2))
+    if week_pattern == "even":
+        return set(range(lo if lo % 2 == 0 else lo + 1, hi + 1, 2))
+    return set(range(lo, hi + 1))
+
+
+def _course_all_sections(course: Course) -> list[Any]:
+    """返回课程的所有上课时段（B1）。
+
+    sections 非空 → 直接返回；
+    否则把扁平字段当作唯一时段（向后兼容）。
+    """
+    if course.sections:
+        return list(course.sections)
+    return [course]
+
+
+def _section_week_filter(section: Any) -> Optional[set[int]]:
+    """取一个时段的周次过滤集合（支持 weeks / weeks_range + week_pattern）。"""
+    if section.weeks:
+        return set(section.weeks)
+    if section.weeks_range:
+        return _expand_weeks_range(section.weeks_range, section.week_pattern)
+    if section.week_pattern in ("odd", "even"):
+        return None  # 走奇偶逻辑
+    return None
+
+
 def _week_occurrences(course: Course, start: date, end: date) -> list[tuple[date, int]]:
     """返回课程在 [start, end] 内的 (上课日, 第几周) 列表。
 
-    - 无 weekday：返回空（一次性课程？用进度记录自行管理 lesson_date）。
-    - 有 weekday + 有 semester_start：按 weekday 计算周偏移。
-      然后用 week_pattern / weeks 过滤：
-        * "all"   → 所有周
-        * "odd"   → 仅奇数周
-        * "even"  → 仅偶数周
-        * "custom"→ 仅 weeks 列表里的周次
-    - 有 weekday + 无 semester_start：按 weekday 推到 start-end 范围，周次固定为 1。
+    支持多时段（sections）：一门课多个 weekday/周次模式/节次都算。
     """
-    if course.weekday is None:
-        return []
-    weeks_filter: Optional[set[int]] = None
-    if course.week_pattern == "custom":
-        weeks_filter = set(course.weeks or [])
-    elif course.week_pattern == "odd":
-        weeks_filter = None  # 走下方奇偶逻辑
-    elif course.week_pattern == "even":
-        weeks_filter = None
-    out: list[tuple[date, int]] = []
-    cur = start
-    while cur <= end:
-        if course.semester_end is not None and cur > course.semester_end:
-            break
-        if cur.weekday() == course.weekday:
-            week_no: Optional[int] = None
-            if course.semester_start is not None:
-                delta_days = (cur - course.semester_start).days
-                if delta_days < 0:
-                    cur += timedelta(days=1)
-                    continue
-                week_no = delta_days // 7 + 1
-                # week_pattern 过滤
-                if course.week_pattern == "odd" and week_no % 2 == 0:
-                    week_no = None
-                elif course.week_pattern == "even" and week_no % 2 == 1:
-                    week_no = None
-                elif course.week_pattern == "custom":
-                    if weeks_filter is not None and week_no not in weeks_filter:
+    sections = _course_all_sections(course)
+    all_out: list[tuple[date, int]] = []
+    seen: set[tuple[date, int]] = set()
+
+    for sec in sections:
+        if sec.weekday is None:
+            continue
+        weeks_filter = _section_week_filter(sec)
+        cur = start
+        while cur <= end:
+            if course.semester_end is not None and cur > course.semester_end:
+                break
+            if cur.weekday() == sec.weekday:
+                week_no: Optional[int] = None
+                if course.semester_start is not None:
+                    delta_days = (cur - course.semester_start).days
+                    if delta_days < 0:
+                        cur += timedelta(days=1)
+                        continue
+                    week_no = delta_days // 7 + 1
+                    # week_pattern 过滤
+                    if sec.week_pattern == "odd" and week_no % 2 == 0:
                         week_no = None
-            if week_no is not None or course.semester_start is None:
-                out.append((cur, week_no if week_no is not None else 1))
-        cur += timedelta(days=1)
-    return out
+                    elif sec.week_pattern == "even" and week_no % 2 == 1:
+                        week_no = None
+                    elif weeks_filter is not None and week_no not in weeks_filter:
+                        week_no = None
+                if week_no is not None or course.semester_start is None:
+                    key = (cur, week_no if week_no is not None else 1)
+                    if key not in seen:
+                        seen.add(key)
+                        all_out.append(key)
+            cur += timedelta(days=1)
+    all_out.sort(key=lambda x: x[0])
+    return all_out
+
+
+def _section_time_text(sec: Any) -> tuple[str, str]:
+    """取一个时段的 (start_time, end_time) 文本；连排用 period_nos 时从课表推。"""
+    st = getattr(sec, "start_time", None)
+    et = getattr(sec, "end_time", None)
+    st_txt = st.strftime("%H:%M") if st else ""
+    et_txt = et.strftime("%H:%M") if et else ""
+    return st_txt, et_txt
+
+
+def _section_period_nos(sec: Any) -> list[int]:
+    """取一个时段占用的节次列表（连排）。"""
+    pnos = getattr(sec, "period_nos", None)
+    if pnos:
+        return list(pnos)
+    pno = getattr(sec, "period_no", None)
+    return [pno] if pno else []
+
+
+def _resolve_period_times(period_nos: list[int]) -> Optional[tuple[str, str]]:
+    """用学校时间表把节次列表解析成 (最早 start, 最晚 end)；任一节缺失则返回 None。"""
+    if not period_nos:
+        return None
+    slots = [period_resolve(p) for p in period_nos]
+    if any(s is None for s in slots):
+        return None
+    starts = [s["start"] for s in slots if s]
+    ends = [s["end"] for s in slots if s]
+    return min(starts), max(ends)
 
 
 def todays_lessons(today: date | None = None) -> list[dict]:
+    """今天的课。多时段课程每段一行，方便教师看清"今天几节课、分别什么时间"。"""
     today = today or date.today()
-    weekday = today.weekday()
     out: list[dict] = []
     for c in db.list_courses():
-        if c.weekday != weekday:
-            continue
-        occs = _week_occurrences(c, today, today)
-        if not occs:
-            continue
-        _, week_no = occs[0]
-        out.append(_dump(c) | {"today_date": today.isoformat(), "week_no": week_no})
-    out.sort(key=lambda x: x.get("start_time") or "")
+        for sec in _course_all_sections(c):
+            if sec.weekday != today.weekday():
+                continue
+            occs = _week_occurrences(c, today, today)
+            if not occs:
+                continue
+            _, week_no = occs[0]
+            st_txt, et_txt = _section_time_text(sec)
+            pnos = _section_period_nos(sec)
+            row = _dump(c) | {"today_date": today.isoformat(), "week_no": week_no}
+            # 用该时段的节次/时间覆盖 course 级别（多时段时 course 级只是主时段）
+            if pnos:
+                row["period_nos"] = pnos
+                if not st_txt:
+                    resolved = _resolve_period_times(pnos)
+                    if resolved:
+                        st_txt, et_txt = resolved
+            if st_txt:
+                row["start_time"] = st_txt
+            if et_txt:
+                row["end_time"] = et_txt
+            if len(_course_all_sections(c)) > 1:
+                row["is_multi_section"] = True
+            out.append(row)
+    out.sort(key=lambda x: (x.get("start_time") or "99:99"))
     return out
 
 
-def week_lessons(start: date | None = None) -> list[dict]:
-    """返回 start 起 7 天内的全部课程（按日期 + 时间排序）。"""
+def week_lessons(start: date | None = None, weeks: int = 1) -> list[dict]:
+    """返回 start 起 weeks 周内的全部课程（按日期 + 时间排序）。
+
+    weeks=1 → 7 天；weeks=2 → 14 天（F4：不再硬编码只能查一周）
+    """
     start = start or date.today()
-    end = start + timedelta(days=6)
+    if weeks < 1 or weeks > 20:
+        raise bad_param("weeks", "取值 1..20")
+    end = start + timedelta(days=7 * weeks - 1)
     out: list[dict] = []
     for c in db.list_courses():
+        sections = _course_all_sections(c)
         occs = _week_occurrences(c, start, end)
+        # 按 (日期, 时段) 展开：一门课多个时段 → 同一天多行
+        by_date: dict[date, int] = {d: w for d, w in occs}
         for d, week_no in occs:
-            out.append(
-                {
+            for sec in sections:
+                if sec.weekday != d.weekday():
+                    continue
+                st_txt, et_txt = _section_time_text(sec)
+                pnos = _section_period_nos(sec)
+                if pnos and not st_txt:
+                    resolved = _resolve_period_times(pnos)
+                    if resolved:
+                        st_txt, et_txt = resolved
+                row = {
                     **_dump(c),
                     "lesson_date": d.isoformat(),
                     "week_no": week_no,
                 }
-            )
-    out.sort(key=lambda x: (x["lesson_date"], x.get("start_time") or ""))
+                if pnos:
+                    row["period_nos"] = pnos
+                if st_txt:
+                    row["start_time"] = st_txt
+                if et_txt:
+                    row["end_time"] = et_txt
+                if len(sections) > 1:
+                    row["is_multi_section"] = True
+                out.append(row)
+    out.sort(key=lambda x: (x["lesson_date"], x.get("start_time") or "99:99"))
     return out
 
 
@@ -180,11 +283,45 @@ def create_progress(data: ProgressCreate | dict) -> ProgressEntry:
     fields = data.model_dump() if hasattr(data, "model_dump") else dict(data)
     if not fields.get("topic"):
         raise bad_param("topic", "本节主题不能为空")
-    if db.get_course(fields["course_id"]) is None:
+    course = db.get_course(fields["course_id"])
+    if course is None:
         raise not_found("课程", fields["course_id"])
     p = ProgressEntry(**fields)
     db.create_progress(p)
     return p
+
+
+def progress_create_with_warning(data: ProgressCreate | dict) -> dict:
+    """progress.create 的返回包装：额外附 F3 的日期告警（若有）。
+
+    create_progress 保持返回领域模型（service 层惯例），本函数只给 CLI/API 用。
+    """
+    p = create_progress(data)
+    out = _dump(p)
+    course = db.get_course(p.course_id)
+    if course is not None:
+        warn = _progress_date_warning(course, p.lesson_date)
+        if warn:
+            out["warning"] = warn
+    return out
+
+
+def _progress_date_warning(course: Course, lesson_date: date) -> str | None:
+    """检查 lesson_date 是否落在该课程的上课日；不是则返回提示（不抛错）。"""
+    if course.weekday is None and not course.sections:
+        return None
+    occs = _week_occurrences(course, lesson_date, lesson_date)
+    if occs:
+        return None
+    wd = lesson_date.isoformat()
+    if course.weekday is not None:
+        cn = "一二三四五六日"
+        return (
+            f"提示：{wd}（周{cn[lesson_date.weekday()]}）"
+            f"不是该课程的上课日（weekday={course.weekday}，周{cn[course.weekday]}）。"
+            "若为补记历史进度可忽略；否则请核对课程时间或日期。"
+        )
+    return f"提示：{wd} 不在该课程的任何上课时段内。若为补记历史进度可忽略；否则请核对。"
 
 
 def update_progress(pid: str, patch: ProgressUpdate | dict) -> ProgressEntry:
@@ -819,16 +956,22 @@ def _validate_schedule(payload: dict) -> None:
 
 
 def school_get_schedule() -> dict:
-    """返回当前生效的学校课程时间表。优先 data/_school_schedule.json，否则默认。"""
+    """返回当前生效的学校课程时间表。优先 data/_school_schedule.json，否则默认。
+
+    返回值额外带 `source` 字段（B4）：
+        - "file"：来自教师覆盖的 data/_school_schedule.json
+        - "builtin_default"：使用内置的 11 节默认表
+    这样调用方不会把"默认表"误判成"空课表"。
+    """
     p = _schedule_path()
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             _validate_schedule(data)
-            return data
+            return {"source": "file", **data}
         except Exception:
             pass  # 损坏就回退默认（绝不抛）
-    return DEFAULT_SCHOOL_SCHEDULE
+    return {"source": "builtin_default", **DEFAULT_SCHOOL_SCHEDULE}
 
 
 def school_set_schedule(schedule: dict) -> dict:
@@ -848,28 +991,201 @@ def period_resolve(period_no: int) -> dict | None:
     for bucket in ("morning", "afternoon", "evening"):
         for it in sched.get(bucket, []):
             if it.get("no") == period_no:
-                return it if False else {"no": it["no"], "start": it["start"], "end": it["end"]}
+                return {"no": it["no"], "start": it["start"], "end": it["end"]}
     return None
 
 
-def course_apply_period(course_id: str) -> Course:
-    """若 Course.period_no 有值且 start_time/end_time 为空，则从学校时间表填充。"""
+def fs_import_file(
+    src: str,
+    top_kind: str = "文件",
+    dirname: str = "资料",
+    filename: str | None = None,
+    role: str | None = None,
+    archive: bool = False,
+) -> dict:
+    """把外部文件导入 Skill 管理的目录（A4 / D2）。
+
+    解决两件事：
+    1. 教师 / Agent 从任意位置（下载目录、桌面、学校共享）拷文件进来，
+       绕开 shell 的路径转义坑（PowerShell 的 `[...]` 通配符、中文路径）
+       —— 文件操作在 Python 侧完成，不经过 shell。
+    2. 顶层归档目录（`文件/资料/` 等）不是课程目录，没有 7 角色结构；
+       本 action 接受任意 `文件/<子目录>/<文件名>` 路径并建立索引记录。
+
+    参数：
+        src: 源文件绝对路径（也接受相对当前工作目录的路径）
+        top_kind: 顶层分类，默认 "文件"
+        dirname: 顶层下的子目录（如 "资料"、"规章制度"）；可省略则用 src 的文件名建在顶层
+        filename: 目标文件名；省略则用 src 的文件名
+        role: 可选；给 7 角色之一（slides/lecture/... 或中文）时记录 role
+        archive: True 则先备份同名旧文件到 _archive
+    """
+    src_path = _Path(src).expanduser()
+    if not src_path.is_absolute():
+        src_path = (_Path.cwd() / src_path).resolve()
+    if not src_path.exists() or not src_path.is_file():
+        raise not_found("源文件", str(src))
+
+    if top_kind not in _TOP_KINDS:
+        raise bad_param("top_kind", f"必须为 {_TOP_KINDS} 之一")
+    if not dirname:
+        raise bad_param("dirname", "不能为空（如 '资料'）")
+    if "/" in dirname or "\\" in dirname or dirname in (".", ".."):
+        raise bad_param("dirname", "只能是顶层下的单个子目录名")
+
+    target_name = filename or src_path.name
+    if "/" in target_name or "\\" in target_name:
+        raise bad_param("filename", "只能是文件名，不能含路径分隔符")
+    _check_extension(target_name)
+
+    dest_dir = _safe_path(f"{top_kind}/{dirname}")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / target_name
+
+    archived = None
+    if dest.exists():
+        if archive:
+            archived = fs_archive(f"{top_kind}/{dirname}/{target_name}").get("dst")
+        elif dest.stat().st_size > 0:
+            raise SkillError(
+                "target_exists",
+                f"{top_kind}/{dirname}/{target_name} 已存在且非空",
+                status=409,
+                hint="加 archive=true 备份旧文件后再导入，或换 filename。",
+            )
+
+    _shutil.copy2(src_path, dest)
+
+    # 建立索引记录（role 可选；非课程目录的 role 允许为 None）
+    rel = f"{top_kind}/{dirname}/{target_name}"
+    role_key: str | None = None
+    if role:
+        if role in DIR_TO_ROLE:  # 中文
+            role_key = DIR_TO_ROLE[role]
+        elif role in ROLE_DIRS:  # 英文枚举
+            role_key = role
+        else:
+            raise bad_param("role", f"必须为 7 个固定角色之一：{sorted(ROLE_DIRS.keys())}")
+    cf = _scan_file_record(rel, None, top_kind, role_key)
+    return {
+        "imported": True,
+        "src": str(src_path),
+        "path": rel,
+        "filename": target_name,
+        "top_kind": top_kind,
+        "dirname": dirname,
+        "role": role_key,
+        "size": dest.stat().st_size,
+        "sha256": cf.sha256 if cf else _sha256_file(dest),
+        "archived_old": archived,
+    }
+
+
+def fs_list_files(top_kind: str, dirname: str, subdir: str | None = None) -> list[dict]:
+    """列出任意顶层子目录（含非课程目录）下的文件（D3）。
+
+    与 course.list_files 的区别：不需要 course_id，也不限于 7 个角色目录。
+    subdir 可选，用于再往下一层（如 `文件/规章制度/2025/`）。
+    """
+    if top_kind not in _TOP_KINDS:
+        raise bad_param("top_kind", f"必须为 {_TOP_KINDS} 之一")
+    rel_base = f"{top_kind}/{dirname}" if not subdir else f"{top_kind}/{dirname}/{subdir}"
+    base = _safe_path(rel_base)
+    if not base.exists() or not base.is_dir():
+        raise not_found("目录", rel_base)
+    out: list[dict] = []
+    for p in sorted(base.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(_data_root()).as_posix()
+        # 角色：从倒数第二层目录名反查（若恰好是 7 角色之一）
+        role_key = None
+        parent_name = p.parent.name
+        if parent_name in DIR_TO_ROLE:
+            role_key = DIR_TO_ROLE[parent_name]
+        # 增量扫描写 DB
+        cf = _scan_file_record(rel, None, top_kind, role_key)
+        out.append(
+            {
+                "path": rel,
+                "filename": p.name,
+                "role": role_key,
+                "top_kind": top_kind,
+                "dirname": dirname,
+                "size": p.stat().st_size,
+                "sha256": cf.sha256 if cf else "",
+                "mtime_ns": p.stat().st_mtime_ns,
+            }
+        )
+    return out
+
+
+def course_apply_period(course_id: str, force: bool = False) -> Course:
+    """用学校时间表把节次填成 start_time/end_time。
+
+    - 支持连排：period_nos=[3,4,5] → start = 第3节开始，end = 第5节结束
+    - 支持多时段：sections 里每个时段各自按自己的 period_nos 填
+    - 已填了时间则不覆盖；force=True 时强制重算（学校课表调整后用）
+    """
     c = get_course(course_id)
-    if c.period_no is None:
+    changed = False
+    from datetime import time as _time
+
+    def _apply(sec: Any, label: str) -> bool:
+        nonlocal changed
+        pnos = _section_period_nos(sec)
+        if not pnos:
+            return False
+        if sec.start_time is not None and sec.end_time is not None and not force:
+            return False
+        slots = [(p, period_resolve(p)) for p in pnos]
+        missing = [p for p, s in slots if s is None]
+        if missing:
+            raise SkillError(
+                "period_not_in_schedule",
+                f"{label} 节次 {missing} 不在学校时间表中",
+                status=422,
+                hint="先调用 school.get_schedule 确认节次，或显式传 start_time/end_time 覆盖。",
+                extra={"missing_periods": missing},
+            )
+        resolved = [s for _, s in slots if s]
+        sec.start_time = _time(int(min(s["start"] for s in resolved)[:2]),
+                               int(min(s["start"] for s in resolved)[3:]))
+        sec.end_time = _time(int(max(s["end"] for s in resolved)[:2]),
+                             int(max(s["end"] for s in resolved)[3:]))
+        changed = True
+        return True
+
+    # 1) 多时段：逐个 section 处理
+    if c.sections:
+        for i, sec in enumerate(c.sections, start=1):
+            _apply(sec, f"第 {i} 个时段")
+        if changed:
+            c.updated_at = datetime.now()
+            db.update_course(c)
         return c
-    if c.start_time is not None and c.end_time is not None:
+
+    # 2) 扁平字段
+    if c.period_no is None and not c.period_nos:
+        return c
+    if c.start_time is not None and c.end_time is not None and not force:
         return c  # 已显式填了，不覆盖
-    slot = period_resolve(c.period_no)
-    if slot is None:
+    pnos = list(c.period_nos) if c.period_nos else [c.period_no]
+    slots = [(p, period_resolve(p)) for p in pnos]
+    missing = [p for p, s in slots if s is None]
+    if missing:
         raise SkillError(
             "period_not_in_schedule",
-            f"节次 {c.period_no} 不在学校时间表中",
+            f"节次 {missing} 不在学校时间表中",
             status=422,
             hint="先调用 school.get_schedule 确认节次，或显式传 start_time/end_time 覆盖。",
+            extra={"missing_periods": missing},
         )
-    from datetime import time as _time
-    c.start_time = _time(int(slot["start"][:2]), int(slot["start"][3:]))
-    c.end_time = _time(int(slot["end"][:2]), int(slot["end"][3:]))
+    resolved = [s for _, s in slots if s]
+    earliest = min(s["start"] for s in resolved)
+    latest = max(s["end"] for s in resolved)
+    c.start_time = _time(int(earliest[:2]), int(earliest[3:]))
+    c.end_time = _time(int(latest[:2]), int(latest[3:]))
     c.updated_at = datetime.now()
     db.update_course(c)
     return c
@@ -1136,6 +1452,41 @@ def course_get_outline(course_id: str) -> dict:
     }
 
 
+def _validate_outline_parsed(parsed: dict) -> None:
+    """校验 refresh_outline 的 parsed 结构（C3）。
+
+    规则：
+    - parsed.weeks 必须是 list
+    - 每项必须有 topics（非空 list of str）
+    - week 若提供则 1..60；同一 week 不可重复
+    """
+    if not isinstance(parsed, dict):
+        raise bad_param("parsed", "必须为对象")
+    weeks = parsed.get("weeks")
+    if weeks is None:
+        raise bad_param("parsed.weeks", "缺失；应为 [{week:1, topics:[\"...\"]}, ...]")
+    if not isinstance(weeks, list):
+        raise bad_param("parsed.weeks", "必须为列表")
+    if not weeks:
+        raise bad_param("parsed.weeks", "不能为空")
+    seen: set[int] = set()
+    for i, wk in enumerate(weeks):
+        if not isinstance(wk, dict):
+            raise bad_param(f"parsed.weeks[{i}]", "必须为对象 {week, topics}")
+        topics = wk.get("topics")
+        if not topics or not isinstance(topics, list) or len(topics) == 0:
+            raise bad_param(f"parsed.weeks[{i}].topics", "必须为非空列表")
+        if not all(isinstance(t, str) and t.strip() for t in topics):
+            raise bad_param(f"parsed.weeks[{i}].topics", "每项必须为非空字符串")
+        w = wk.get("week")
+        if w is not None:
+            if not isinstance(w, int) or not (1 <= w <= 60):
+                raise bad_param(f"parsed.weeks[{i}].week", "必须为 1..60 的整数")
+            if w in seen:
+                raise bad_param(f"parsed.weeks[{i}].week", f"周次 {w} 重复")
+            seen.add(w)
+
+
 def course_refresh_outline(course_id: str, parsed: dict) -> Course:
     """大模型把大纲解析完回填。parsed 形如：
         {weeks: [{week: 1, topics: ["极限", "连续"]}, ...], file_mtime_ns: 123456}
@@ -1144,8 +1495,7 @@ def course_refresh_outline(course_id: str, parsed: dict) -> Course:
     下次 course.get_outline 用它判断 stale。
     """
     c = get_course(course_id)
-    if not isinstance(parsed, dict):
-        raise bad_param("parsed", "必须为对象 {weeks:[{week,topics:[...]},...], file_mtime_ns?}")
+    _validate_outline_parsed(parsed)
     # 注入当前文件 mtime（若 caller 没传）
     if "file_mtime_ns" not in parsed and c.outline_path:
         bind = db.get_binding_by_course(course_id)
@@ -1161,6 +1511,60 @@ def course_refresh_outline(course_id: str, parsed: dict) -> Course:
     c.updated_at = datetime.now()
     db.update_course(c)
     return c
+
+
+def course_suggest_outline(course_id: str, topics: list[str], weeks_total: int | None = None) -> dict:
+    """给大模型一个"周次映射建议"（C3 的 --dry-run）。
+
+    输入：课程 + 平铺的章节列表（["第1章 极限", "第2章 连续", ...]）
+    输出：按教学周均匀分配的映射建议（不落库，确认后再调 refresh_outline）
+
+    启发式：
+    - 教学周数优先取 course 的实际学期长度（有 semester_start/end 就按周一到期末算），
+      否则取 weeks_total 参数，否则按 topics 数量 1:1
+    - 章节按顺序均匀摊到这些教学周里；不足则部分周多章，多余的章留到最后一并给出提醒
+    """
+    c = get_course(course_id)
+    if not topics or not isinstance(topics, list):
+        raise bad_param("topics", "必须为非空字符串列表")
+
+    # 1) 决定教学周数
+    total_weeks: Optional[int] = weeks_total
+    if total_weeks is None and c.semester_start is not None:
+        end = c.semester_end
+        if end is None:
+            today = date.today()
+            end = min(today, c.semester_start + timedelta(weeks=30))
+        if end >= c.semester_start:
+            total_weeks = ((end - c.semester_start).days // 7) + 1
+    if not total_weeks or total_weeks < 1:
+        total_weeks = len(topics)
+
+    # 2) 均匀摊派
+    n = len(topics)
+    per_week = max(1, -(-n // total_weeks))  # ceil
+    mapping: list[dict] = []
+    for i, t in enumerate(topics):
+        wk = min(total_weeks, (i // per_week) + 1)
+        if wk == total_weeks and mapping and mapping[-1]["week"] == wk:
+            mapping[-1]["topics"].append(str(t))
+        else:
+            mapping.append({"week": wk, "topics": [str(t)]})
+
+    return {
+        "course_id": course_id,
+        "topics_count": n,
+        "weeks_total": total_weeks,
+        "weeks_used": len(mapping),
+        "chapters_per_week": per_week,
+        "suggestion": mapping,
+        "note": (
+            "这是按'均匀分配'给出的建议，仅供参考。"
+            "确认或调整后，用 course.refresh_outline 落库"
+            "（parsed={'weeks': <调整后的 mapping>}）。"
+        ),
+        "dry_run": True,
+    }
 
 
 def course_next_topic(course_id: str, target_date: date | None = None) -> dict:
@@ -1196,7 +1600,6 @@ def course_next_topic(course_id: str, target_date: date | None = None) -> dict:
 
     # 找 outline_cache 里 target_week 的 topics
     outline_target_topics: Optional[str] = None
-    last_done_week: Optional[int] = None
     if isinstance(c.outline_cache, dict):
         for wk in c.outline_cache.get("weeks", []) or []:
             if not isinstance(wk, dict):
@@ -1204,32 +1607,57 @@ def course_next_topic(course_id: str, target_date: date | None = None) -> dict:
             if wk.get("week") == target_week:
                 topics = wk.get("topics") or []
                 outline_target_topics = "\n".join(str(t) for t in topics) if topics else None
-            if last is not None and wk.get("week") is not None:
-                # 用 progress 记录的 lesson_date 反推属于大纲第几周
-                pass
-        # 简化：按 progress 的 lesson_date 反推
-        if last is not None and c.semester_start is not None:
+
+    # ---- C2 修复：current_week 优先用 ProgressEntry.outline_week ----
+    # 语义：outline_week = "这次课讲的是大纲里的第几周"（教师/LLM 显式记录）
+    #       回退：lesson_date 反推教学周序号（只看日期，不知道讲到第几章）
+    # 注意：这段不依赖 outline_cache 是否存在（修复原 bug）
+    last_done_week: Optional[int] = None
+    current_week_source: Optional[str] = None
+    if last is not None:
+        if last.outline_week is not None:
+            last_done_week = last.outline_week
+            current_week_source = "progress.outline_week"
+        elif c.semester_start is not None:
             last_delta = (last.lesson_date - c.semester_start).days
             if last_delta >= 0:
                 last_done_week = last_delta // 7 + 1
+                current_week_source = "lesson_date"
+    else:
+        current_week_source = None
 
-    lag_weeks = (target_week or 0) - (last_done_week or 0)
-    if last_done_week is None:
-        hint = "还没有任何进度记录，请先创建首条 ProgressEntry。"
-    elif last_done_week == target_week:
+    # ---- 计算"落后/超前" ----
+    # C1 修复：last_done_week 为 None（尚无进度记录）时 lag_weeks 返回 None，
+    #          而非退化成 target_week - 0 = target_week（读起来像"落后 N 周"）。
+    if target_week is None:
+        lag_weeks = None
+    elif last_done_week is None:
+        lag_weeks = None  # 尚无进度记录，无法计算落后
+    else:
+        lag_weeks = target_week - last_done_week
+
+    if target_week is None:
+        hint = "课程未设置 semester_start，无法推算周次；请先用 course.update 补 semester_start。"
+    elif last_done_week is None:
+        hint = (
+            "尚无进度记录，无法计算落后周数。"
+            f"大纲建议本周（第 {target_week} 周）讲：{outline_target_topics or '（大纲未提供该周内容）'}"
+        )
+    elif lag_weeks == 0:
         hint = "大纲周次与已讲一致，无需补进度。"
     elif lag_weeks > 0:
-        hint = f"大纲本周应讲第 {target_week} 周，落后 {lag_weeks} 周。"
+        hint = f"大纲本周应讲第 {target_week} 周，已讲到第 {last_done_week} 周，落后 {lag_weeks} 周。"
     elif lag_weeks < 0:
-        hint = f"已讲到第 {last_done_week} 周，超前大纲 {-lag_weeks} 周。"
+        hint = f"已讲到第 {last_done_week} 周，大纲本周才到第 {target_week} 周，超前 {-lag_weeks} 周。"
     else:
-        hint = "无明确周次差异（target_week 为空时）。"
+        hint = "无明确周次差异。"
 
     return {
         "course_id": course_id,
         "target_date": target_date.isoformat(),
         "target_week": target_week,
         "current_week": last_done_week,
+        "current_week_source": current_week_source,
         "outline_target": outline_target_topics,
         "recent_topic": last.topic if last is not None else None,
         "recent_lesson_date": last.lesson_date.isoformat() if last is not None else None,

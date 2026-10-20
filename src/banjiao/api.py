@@ -65,10 +65,10 @@ def today_lessons():
 
 
 @app.get("/api/courses/week")
-def week_lessons(start: str | None = None):
+def week_lessons(start: str | None = None, weeks: int = 1):
     from datetime import date
     s = date.fromisoformat(start) if start else None
-    return service.week_lessons(s)
+    return service.week_lessons(s, weeks=weeks)
 
 
 @app.get("/api/courses/{cid}")
@@ -332,6 +332,34 @@ def fs_archive(body: dict):
         raise HTTPException(status_code=e.status, detail=e.to_dict())
 
 
+class FsImportBody(BaseModel):
+    src: str
+    top_kind: str = "文件"
+    dirname: str = "资料"
+    filename: str | None = None
+    role: str | None = None
+    archive: bool = False
+
+
+@app.post("/api/fs/import-file")
+def fs_import_file(body: FsImportBody):
+    try:
+        return service.fs_import_file(
+            body.src, top_kind=body.top_kind, dirname=body.dirname,
+            filename=body.filename, role=body.role, archive=body.archive,
+        )
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+@app.get("/api/fs/list-files")
+def fs_list_files(top_kind: str, dirname: str, subdir: str | None = None):
+    try:
+        return service.fs_list_files(top_kind, dirname, subdir=subdir)
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
 class FsDeleteBody(BaseModel):
     path: str
     confirm: str | None = None
@@ -367,9 +395,22 @@ def school_set_schedule(body: SchoolSetBody):
 # ============== 大纲 + 进度结合（阶段 ④） ==============
 
 @app.post("/api/courses/{cid}/apply-period")
-def course_apply_period(cid: str):
+def course_apply_period(cid: str, force: bool = False):
     try:
-        return service.course_apply_period(cid).model_dump(mode="json")
+        return service.course_apply_period(cid, force=force).model_dump(mode="json")
+    except SkillError as e:
+        raise HTTPException(status_code=e.status, detail=e.to_dict())
+
+
+class CourseSuggestOutlineBody(BaseModel):
+    topics: list[str]
+    weeks_total: int | None = None
+
+
+@app.post("/api/courses/{cid}/suggest-outline")
+def course_suggest_outline(cid: str, body: CourseSuggestOutlineBody):
+    try:
+        return service.course_suggest_outline(cid, body.topics, weeks_total=body.weeks_total)
     except SkillError as e:
         raise HTTPException(status_code=e.status, detail=e.to_dict())
 

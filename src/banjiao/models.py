@@ -71,6 +71,68 @@ def _coerce_week_pattern(week_pattern: Optional[str], weeks: Optional[list[int]]
     return "all"
 
 
+class CourseSection(BaseModel):
+    """课程的一个上课时段（B1 / B2）。
+
+    一门课一周可能有多个时段（如"周二上午 3-5 节" + "周三下午 8-9 节"），
+    用 sections 表达；Course 上的扁平字段（weekday/period_no/...）视为主时段（sections[0]），
+    保持向后兼容。
+
+    连排节次：period_start + period_end，或直接给 period_nos=[3,4,5]。
+    不给节次时用 start_time / end_time 覆盖。
+    """
+
+    weekday: int = Field(ge=0, le=6)
+    week_pattern: WeekPattern = "all"
+    weeks: Optional[list[int]] = None
+    weeks_range: Optional[list[int]] = Field(default=None, min_length=2, max_length=2)
+    period_nos: Optional[list[int]] = Field(default=None, min_length=1)
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+    location: Optional[str] = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.week_pattern == "all" and self.weeks:
+            object.__setattr__(self, "week_pattern", "custom")
+        if self.weeks_range is not None:
+            lo, hi = self.weeks_range
+            if lo > hi:
+                raise ValueError("weeks_range 必须是 [起, 止] 且 起 <= 止")
+        if self.weeks_range and self.weeks:
+            raise ValueError("weeks_range 与 weeks 不应同时提供")
+        if self.period_nos is not None:
+            if not all(1 <= p <= 12 for p in self.period_nos):
+                raise ValueError("period_nos 元素必须在 1..12 之间")
+            if len(set(self.period_nos)) != len(self.period_nos):
+                raise ValueError("period_nos 不应重复")
+        if self.start_time and self.end_time and self.end_time < self.start_time:
+            raise ValueError("结束时间不能早于开始时间")
+        return self
+
+
+def _validate_course_extra(
+    weeks_range: Optional[list[int]],
+    weeks: Optional[list[int]],
+    period_nos: Optional[list[int]],
+) -> None:
+    """校验 Course 的 weeks_range / period_nos（B2 / B3）。"""
+    if weeks_range is not None:
+        lo, hi = weeks_range
+        if lo > hi:
+            raise ValueError("weeks_range 必须是 [起, 止] 且 起 <= 止")
+        if weeks:
+            raise ValueError("weeks_range 与 weeks 不应同时提供")
+    if period_nos is not None:
+        if not all(1 <= p <= 12 for p in period_nos):
+            raise ValueError("period_nos 元素必须在 1..12 之间")
+        if len(set(period_nos)) != len(period_nos):
+            raise ValueError("period_nos 不应重复")
+        # 连排合法性：同一 section 内应连续（允许无序传入，但不允许跨 section 混排）
+        if period_nos != sorted(period_nos):
+            raise ValueError("period_nos 应按升序排列（如 [3,4,5]）")
+
+
 class Course(BaseModel):
     """课程基本信息 + 周次表。
 
@@ -80,10 +142,13 @@ class Course(BaseModel):
         - "even"：仅偶数周
         - "custom"：仅 weeks 列表里的周次
 
-    节次（period_no）：
-        1..12 对应学校第一节…第十一节（学校默认时间表可通过 school.get_schedule 查询）。
-        教师也可以不传 period_no，直接传 start_time / end_time 覆盖。
-        两者同时给时，period_no 仅用于查询提示，schedule 时间才是上课时间。
+    节次：
+        - period_no：单节（1..12），向后兼容字段
+        - period_nos：连排多节（如 [3,4,5] 表示 3-5 节连排）
+        - sections：一门课多个上课时段（B1）。sections 为空时用扁平字段。
+
+    学校默认时间表可通过 school.get_schedule 查询；
+    course.apply_period 会用节次填 start_time/end_time（已填则不覆盖）。
     """
 
     id: str = Field(default_factory=_new_id)
@@ -97,7 +162,11 @@ class Course(BaseModel):
     weekday: Optional[int] = Field(default=None, ge=0, le=6)
     week_pattern: WeekPattern = "all"
     weeks: Optional[list[int]] = None
+    weeks_range: Optional[list[int]] = Field(default=None, min_length=2, max_length=2)
     period_no: Optional[int] = Field(default=None, ge=1, le=12)
+    period_nos: Optional[list[int]] = Field(default=None, min_length=1)
+    # B1：一门课多个上课时段。空列表表示"只用扁平字段"。
+    sections: Optional[list[CourseSection]] = None
     # 大纲文件：仅存文件名（如 "outline.md"）；完整路径由绑定目录 + 大纲角色子目录推导。
     # outline_cache: 大模型解析后的结构化大纲（dict 形式）。
     #   Skill 不调 LLM；大模型解析完后调用 course.refresh_outline 回填。
@@ -115,6 +184,7 @@ class Course(BaseModel):
         if self.week_pattern == "all" and self.weeks:
             object.__setattr__(self, "week_pattern", "custom")
         _validate_course_week_logic(self.week_pattern, self.weeks)
+        _validate_course_extra(self.weeks_range, self.weeks, self.period_nos)
         if (
             self.semester_start is not None
             and self.semester_end is not None
@@ -135,7 +205,10 @@ class CourseCreate(BaseModel):
     weekday: Optional[int] = Field(default=None, ge=0, le=6)
     week_pattern: WeekPattern = "all"
     weeks: Optional[list[int]] = None
+    weeks_range: Optional[list[int]] = Field(default=None, min_length=2, max_length=2)
     period_no: Optional[int] = Field(default=None, ge=1, le=12)
+    period_nos: Optional[list[int]] = Field(default=None, min_length=1)
+    sections: Optional[list[CourseSection]] = None
     outline_path: Optional[str] = Field(default=None, max_length=255)
     notes: Optional[str] = Field(default=None, max_length=2000)
 
@@ -146,6 +219,7 @@ class CourseCreate(BaseModel):
         if self.week_pattern == "all" and self.weeks:
             object.__setattr__(self, "week_pattern", "custom")
         _validate_course_week_logic(self.week_pattern, self.weeks)
+        _validate_course_extra(self.weeks_range, self.weeks, self.period_nos)
         if (
             self.semester_start is not None
             and self.semester_end is not None
@@ -166,7 +240,10 @@ class CourseUpdate(BaseModel):
     weekday: Optional[int] = Field(default=None, ge=0, le=6)
     week_pattern: Optional[WeekPattern] = None
     weeks: Optional[list[int]] = None
+    weeks_range: Optional[list[int]] = Field(default=None, min_length=2, max_length=2)
     period_no: Optional[int] = Field(default=None, ge=1, le=12)
+    period_nos: Optional[list[int]] = Field(default=None, min_length=1)
+    sections: Optional[list[CourseSection]] = None
     outline_path: Optional[str] = Field(default=None, max_length=255)
     notes: Optional[str] = Field(default=None, max_length=2000)
 
@@ -180,6 +257,9 @@ class CourseUpdate(BaseModel):
             if self.week_pattern == "all" and self.weeks:
                 object.__setattr__(self, "week_pattern", "custom")
             _validate_course_week_logic(self.week_pattern, self.weeks)
+        # weeks_range / period_nos 只要给了就校验（它们各自内部自洽即可）
+        if self.weeks_range is not None or self.period_nos is not None:
+            _validate_course_extra(self.weeks_range, self.weeks, self.period_nos)
         if self.semester_start is not None and self.semester_end is not None:
             if self.semester_end < self.semester_start:
                 raise ValueError("semester_end 不能早于 semester_start")
@@ -189,12 +269,18 @@ class CourseUpdate(BaseModel):
 # ============== 课程进度 ==============
 
 class ProgressEntry(BaseModel):
-    """某次课的实际进度记录。"""
+    """某次课的实际进度记录。
+
+    outline_week（可选）：本次课对应"大纲里的第几周"。
+        - 传了它，course.next_topic 用它算"落后/超前"（更贴近教学内容）
+        - 不传，则回退用 lesson_date 反推教学周序号（只看日期，不知道讲到第几章）
+    """
 
     id: str = Field(default_factory=_new_id)
     course_id: str
     lesson_date: date
     topic: str = Field(min_length=1, max_length=200)
+    outline_week: Optional[int] = Field(default=None, ge=1, le=60)
     outline: Optional[str] = Field(default=None, max_length=2000)
     completed: bool = False
     notes: Optional[str] = Field(default=None, max_length=2000)
@@ -206,6 +292,7 @@ class ProgressCreate(BaseModel):
     course_id: str
     lesson_date: date
     topic: str = Field(min_length=1, max_length=200)
+    outline_week: Optional[int] = Field(default=None, ge=1, le=60)
     outline: Optional[str] = Field(default=None, max_length=2000)
     completed: bool = False
     notes: Optional[str] = Field(default=None, max_length=2000)
@@ -213,6 +300,7 @@ class ProgressCreate(BaseModel):
 
 class ProgressUpdate(BaseModel):
     topic: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    outline_week: Optional[int] = Field(default=None, ge=1, le=60)
     outline: Optional[str] = Field(default=None, max_length=2000)
     completed: Optional[bool] = None
     notes: Optional[str] = Field(default=None, max_length=2000)
@@ -344,7 +432,11 @@ class CoursePublic(BaseModel):
     weekday: Optional[int] = None
     week_pattern: str = "all"
     weeks: Optional[list[int]] = None
+    weeks_range: Optional[list[int]] = None
     period_no: Optional[int] = None
+    period_nos: Optional[list[int]] = None
+    sections: Optional[list[dict]] = None
+    outline_path: Optional[str] = None
     notes: Optional[str] = None
     created_at: datetime
     updated_at: datetime

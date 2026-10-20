@@ -1,4 +1,4 @@
-# 伴教（Banjiao）· 面向 AI Agent 的教学事务 Skill
+﻿# 伴教（Banjiao）· 面向 AI Agent 的教学事务 Skill
 
 > 一个单机、单教师的教学事务 Skill，AI Agent 通过命令行直接读写本地 SQLite 数据，网页前端只是"看一眼"的临时工具。
 
@@ -29,8 +29,8 @@ https://github.com/shao-xy/banjiao/releases/download/v0.2.1/banjiao-slim-v0.2.1.
 
 ## 1. 这是什么
 
-- **Skill 接口**：[scripts/skill.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/scripts/skill.py) —— AI Agent 调用此脚本读写数据，不依赖 HTTP。
-- **可视化前端**：[run_web.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/run_web.py) —— 临时启动 FastAPI + 极简网页，看完关闭。
+- **Skill 接口**：[scripts/skill.py](./scripts/skill.py) —— AI Agent 调用此脚本读写数据，不依赖 HTTP。
+- **可视化前端**：[run_web.py](./run_web.py) —— 临时启动 FastAPI + 极简网页，看完关闭。
 - **持久化**：SQLite 单文件 `data/banjiao.db`，无外部数据库服务。
 - **可选**：向量索引模块，启用后可对教学文档做语义检索。
 
@@ -114,7 +114,23 @@ python -m venv .venv
 # 创建课程（含单双周 + 学期 + 节次）
 python scripts\skill.py course.create --json '{"name":"高等数学","class_group":"2024-A","weekday":2,"semester_start":"2026-09-07","semester_end":"2027-01-10","week_pattern":"odd","start_time":"08:00","end_time":"09:50","period_no":1}'
 
-# 把学校第一节的 08:00-08:45 填到 start_time/end_time
+# 一门课一周多个时段（B1）+ 连排节次（B2）+ 周次区间（B3）
+python scripts\skill.py course.create --json '{
+  "name":"操作系统","semester_start":"2026-09-07","semester_end":"2027-01-10",
+  "sections":[
+    {"weekday":1,"week_pattern":"all","period_nos":[3,4,5]},
+    {"weekday":2,"week_pattern":"odd","weeks_range":[1,7],"period_nos":[8,9]},
+    {"weekday":1,"week_pattern":"odd","weeks_range":[9,15],"period_nos":[1,2]}
+  ]}'
+# → 周二 3-5 节全期 + 周三 8-9 节单双周 1-7 周 + 周二 1-2 节单双周 9-15 周
+
+# 用学校第 1-3 节时间填起止时间；学校课表调整后 force 强制重算
+python scripts\skill.py course.apply_period --json '{"id":"<cid>","force":true}'
+
+# 看未来 4 周课表（F4）
+python scripts\skill.py course.week --json '{"start":"2026-10-20","weeks":4}'
+
+# 把学校第一节 08:00-08:45 填到 start_time/end_time
 python scripts\skill.py course.apply_period --json '{"id":"<cid>"}'
 
 # 看今日课表
@@ -136,14 +152,27 @@ python scripts\skill.py fs.bind_course --json '{"top_kind":"教学","dirname":"�
 # 3) 增量扫描（mtime 不变 → 复用 sha256）
 python scripts\skill.py fs.scan_course --json '{"course_id":"<cid>"}'
 
-# 4) 读大纲（文本→字符串；其它→base64）
+# 6) 读大纲（文本→字符串；其它→base64）
 python scripts\skill.py fs.read_file --json '{"course_id":"<cid>","role":"outline","filename":"outline.md"}'
 
-# 5) 大模型解析完大纲后回填 cache（Skill 不调 LLM）
+# 6b) 章节多、学期长，不确定怎么映射到教学周？先要一份建议（C3）
+python scripts\skill.py course.suggest_outline --json '{"id":"<cid>","topics":["第1章 极限","第2章 连续","第3章 导数"]}'
+# → 返回 weeks_used / chapters_per_week / suggestion（不落库，确认后再调 refresh_outline）
+
+# 7) 大模型解析完大纲后回填 cache（Skill 不调 LLM）
 python scripts\skill.py course.refresh_outline --json '{"id":"<cid>","parsed":{"weeks":[{"week":1,"topics":["极限定义","极限运算"]}]}}'
 
-# 6) 算出"今天该讲哪"
+# 8) 算出"今天该讲哪"
 python scripts\skill.py course.next_topic --json '{"id":"<cid>","target_date":"2026-10-20"}'
+
+# 8b) 记进度时带上"这次课讲的是大纲第几周"（C2：比日期更贴近教学进度）
+python scripts\skill.py progress.create --json '{"course_id":"<cid>","lesson_date":"2026-10-20","topic":"极限定义","outline_week":1}'
+
+# 9) 从下载目录导入学校文件到「文件/资料/」（绕开 shell 路径转义，A4）
+python scripts\skill.py fs.import_file --json '{"src":"C:\\Users\\你\\Downloads\\苏工[2025]15号.pdf","top_kind":"文件","dirname":"资料"}'
+
+# 10) 列出「文件/资料/」下所有文件（D3：不需要 course_id）
+python scripts\skill.py fs.list_files --json '{"top_kind":"文件","dirname":"资料"}'
 
 # 把大纲文件加入向量索引
 python scripts\skill.py doc.add_file --json '{"title":"高等数学大纲","rel_path":"calculus.md"}'
@@ -235,19 +264,23 @@ python scripts\skill.py vec.search --json '{"query":"极限定义","top_k":3}'
 | `BANJIAO_ENABLE_VECTOR` | `0` | 是否启用向量检索（`1/true/yes/on` 视为开启） |
 | `BANJIAO_VECTOR_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | 嵌入模型 |
 
+> ⚠️ **`BANJIAO_DATA_DIR` 必须指向 `data` 子目录**（如 `<skill_root>/data` 或 `/var/lib/banjiao`）。
+> 若指向 Skill 根目录，SQLite 数据库与 `教学/科研/事务/文件` 四个业务文件夹会散落在根目录，与 §3 目录结构不符。
+
 ---
 
 ## 7. 测试
 
 | 文件 | 数量 | 覆盖范围 |
 | --- | --- | --- |
-| [tests/test_edge.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/tests/test_edge.py) | 98 | 数据完整性（Pydantic 字段 / model_validator）；课程周次边界；作业与事务；提醒与时间判定；持久化与并发；SQL 注入；标准化错误；JSON 序列化；LLM 入口脚本端到端 |
-| [tests/test_fs_edge.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/tests/test_fs_edge.py) | 29 | 阶段① 文件系统骨架（路径约束 / 绑定 / 增量扫描 / 硬删确认） |
-| [tests/test_schedule_edge.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/tests/test_schedule_edge.py) | 40 | 阶段② 单双周/区间周 + 节次 + 学校课程时间表 + fs.archive |
-| [tests/test_fileio_edge.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/tests/test_fileio_edge.py) | 31 | 阶段③ 文件读写（read_file / write_text / 20MB 上限 / 二进制后缀拒绝 / 历史版本） |
-| [tests/test_outline_edge.py](file:///d:/0000-SXY/1-Projects/伴教/banjiao/tests/test_outline_edge.py) | 34 | 阶段④ 大纲读取/缓存/进度结合（next_topic 事实卡） |
+| [tests/test_edge.py](./tests/test_edge.py) | 98 | 数据完整性（Pydantic 字段 / model_validator）；课程周次边界；作业与事务；提醒与时间判定；持久化与并发；SQL 注入；标准化错误；JSON 序列化；LLM 入口脚本端到端 |
+| [tests/test_fs_edge.py](./tests/test_fs_edge.py) | 29 | 阶段① 文件系统骨架（路径约束 / 绑定 / 增量扫描 / 硬删确认） |
+| [tests/test_schedule_edge.py](./tests/test_schedule_edge.py) | 40 | 阶段② 单双周/区间周 + 节次 + 学校课程时间表 + fs.archive |
+| [tests/test_fileio_edge.py](./tests/test_fileio_edge.py) | 31 | 阶段③ 文件读写（read_file / write_text / 20MB 上限 / 二进制后缀拒绝 / 历史版本） |
+| [tests/test_outline_edge.py](./tests/test_outline_edge.py) | 42 | 阶段④ 大纲读取/缓存/进度结合（next_topic 事实卡 + outline_week） |
+| [tests/test_v030_edge.py](./tests/test_v030_edge.py) | 96 | v0.3.0 修复验证（裸 JSON 修补 / BOM / out-file / 多时段 sections / 连排 period_nos / weeks_range / 大纲结构校验 + suggest / import_file / list_files / week weeks=N / 日期告警） |
 
-合计 **232 项断言**，本地全绿。
+合计 **336 项断言**，本地全绿。
 
 ```powershell
 # 跑某一组
@@ -256,7 +289,11 @@ python -u tests\test_fs_edge.py
 python -u tests\test_schedule_edge.py
 python -u tests\test_fileio_edge.py
 python -u tests\test_outline_edge.py
+python -u tests\test_v030_edge.py
 ```
+
+> `banjiao-slim.zip` **不含** `tests/`（体积最小，供 Agent 使用）。
+> 需要跑测试请用完整包 `banjiao.zip` 或直接 clone 仓库。
 
 输出彩色高亮 ✅ / ❌，打印 `通过 N / N` 或失败明细。所有测试都用 `BANJIAO_DATA_DIR` 隔离到 `temp/banjiao_test_*`，不污染默认 `data/`。
 
@@ -307,3 +344,4 @@ del data\banjiao.db
 
 - ❌ 用作者 / 贡献者名字背书你的衍生产品（除非获得书面许可）
 - ❌ 因使用本 Skill 造成的损害要求作者承担责任
+

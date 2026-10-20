@@ -32,7 +32,10 @@ CREATE TABLE IF NOT EXISTS courses (
     weekday         INTEGER,
     week_pattern    TEXT NOT NULL DEFAULT 'all',
     weeks           TEXT NOT NULL DEFAULT '[]',
+    weeks_range     TEXT,
     period_no       INTEGER,
+    period_nos      TEXT,
+    sections        TEXT,
     outline_path    TEXT,
     outline_cache   TEXT,
     notes           TEXT,
@@ -47,6 +50,7 @@ CREATE TABLE IF NOT EXISTS progress (
     course_id   TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
     lesson_date TEXT NOT NULL,
     topic       TEXT NOT NULL,
+    outline_week INTEGER,
     outline     TEXT,
     completed   INTEGER NOT NULL DEFAULT 0,
     notes       TEXT,
@@ -137,6 +141,11 @@ def _course_row(c: Course) -> dict:
     return {
         **c.model_dump(mode="json"),
         "weeks": json.dumps(c.weeks or [], ensure_ascii=False),
+        "weeks_range": json.dumps(c.weeks_range, ensure_ascii=False) if c.weeks_range else None,
+        "period_nos": json.dumps(c.period_nos, ensure_ascii=False) if c.period_nos else None,
+        "sections": json.dumps(
+            [s.model_dump(mode="json") for s in c.sections], ensure_ascii=False
+        ) if c.sections else None,
         "outline_cache": json.dumps(c.outline_cache, ensure_ascii=False) if c.outline_cache is not None else None,
     }
 
@@ -144,6 +153,24 @@ def _course_row(c: Course) -> dict:
 def _row_to_course(row: sqlite3.Row) -> Course:
     d = dict(row)
     d["weeks"] = json.loads(d.get("weeks") or "[]")
+    # weeks_range / period_nos / sections：JSON 文本 → Python 对象
+    for key in ("weeks_range", "period_nos"):
+        raw = d.get(key)
+        if raw:
+            try:
+                d[key] = json.loads(raw)
+            except Exception:
+                d[key] = None
+        else:
+            d[key] = None
+    raw_sections = d.get("sections")
+    if raw_sections:
+        try:
+            d["sections"] = json.loads(raw_sections)
+        except Exception:
+            d["sections"] = None
+    else:
+        d["sections"] = None
     raw_cache = d.get("outline_cache")
     if raw_cache:
         try:
@@ -242,11 +269,11 @@ class DB:
     def create_course(self, c: Course) -> Course:
         self._mutate(
             "INSERT INTO courses (id,name,class_group,location,semester_start,semester_end,"
-            "start_time,end_time,weekday,week_pattern,weeks,period_no,"
-            "outline_path,outline_cache,notes,created_at,updated_at) "
+            "start_time,end_time,weekday,week_pattern,weeks,weeks_range,period_no,period_nos,"
+            "sections,outline_path,outline_cache,notes,created_at,updated_at) "
             "VALUES (:id,:name,:class_group,:location,:semester_start,:semester_end,"
-            ":start_time,:end_time,:weekday,:week_pattern,:weeks,:period_no,"
-            ":outline_path,:outline_cache,:notes,:created_at,:updated_at)",
+            ":start_time,:end_time,:weekday,:week_pattern,:weeks,:weeks_range,:period_no,:period_nos,"
+            ":sections,:outline_path,:outline_cache,:notes,:created_at,:updated_at)",
             _course_row(c),
         )
         return c
@@ -266,7 +293,8 @@ class DB:
             "UPDATE courses SET name=:name, class_group=:class_group, location=:location, "
             "semester_start=:semester_start, semester_end=:semester_end, "
             "start_time=:start_time, end_time=:end_time, weekday=:weekday, "
-            "week_pattern=:week_pattern, weeks=:weeks, period_no=:period_no, "
+            "week_pattern=:week_pattern, weeks=:weeks, weeks_range=:weeks_range, "
+            "period_no=:period_no, period_nos=:period_nos, sections=:sections, "
             "outline_path=:outline_path, outline_cache=:outline_cache, "
             "notes=:notes, updated_at=:updated_at WHERE id=:id",
             _course_row(c),
@@ -283,8 +311,9 @@ class DB:
     # ---- 进度 ----
     def create_progress(self, p: ProgressEntry) -> ProgressEntry:
         self._mutate(
-            "INSERT INTO progress (id,course_id,lesson_date,topic,outline,completed,notes,"
-            "created_at,updated_at) VALUES (:id,:course_id,:lesson_date,:topic,:outline,"
+            "INSERT INTO progress (id,course_id,lesson_date,topic,outline_week,outline,"
+            "completed,notes,created_at,updated_at) "
+            "VALUES (:id,:course_id,:lesson_date,:topic,:outline_week,:outline,"
             ":completed,:notes,:created_at,:updated_at)",
             _progress_row(p),
         )
@@ -309,7 +338,8 @@ class DB:
     def update_progress(self, p: ProgressEntry) -> ProgressEntry:
         self._mutate(
             "UPDATE progress SET course_id=:course_id, lesson_date=:lesson_date, "
-            "topic=:topic, outline=:outline, completed=:completed, notes=:notes, "
+            "topic=:topic, outline_week=:outline_week, outline=:outline, "
+            "completed=:completed, notes=:notes, "
             "updated_at=:updated_at WHERE id=:id",
             _progress_row(p),
         )

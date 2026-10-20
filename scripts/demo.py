@@ -66,8 +66,15 @@ def step(desc: str, action: str, payload: dict | None = None, expect_ok: bool = 
         if isinstance(data, dict):
             keys = [k for k in ("id", "name", "ok", "written", "has_file", "stale",
                                   "target_week", "current_week", "lag_weeks",
-                                  "versions", "lessons_count") if k in data]
+                                  "versions", "lessons_count", "source",
+                                  "weeks_used", "chapters_per_week",
+                                  # B4：学校课表是嵌套结构，列出各段节数才不误导成"空"
+                                  "morning", "afternoon", "evening") if k in data]
             brief = {k: data[k] for k in keys}
+            # 课表这种嵌套 list 换成"段数"，避免刷屏
+            for bucket in ("morning", "afternoon", "evening"):
+                if bucket in brief and isinstance(brief[bucket], list):
+                    brief[bucket] = f"{len(brief[bucket])} 节"
         elif isinstance(data, list):
             brief = f"list len={len(data)}"
         else:
@@ -159,8 +166,19 @@ def main() -> int:
     step("指定大纲文件", "course.set_outline_path",
          {"id": course_id, "filename": "outline.md"})
 
+    # 先问 Skill 要一份"章节 → 教学周"的映射建议（不确定时先看建议再落库）
+    chapters = ["第1章 极限", "第2章 连续", "第3章 导数",
+                "第4章 微分中值定理", "第5章 不定积分", "第6章 定积分"]
+    r_sug = step(
+        "不确定章节怎么摊到教学周？先要一份映射建议（不落库）",
+        "course.suggest_outline",
+        {"id": course_id, "topics": chapters, "weeks_total": 12},
+        expect_ok=True,
+    )
+    suggestion = (r_sug.get("data") or {}).get("suggestion")
+
     parsed_outline = {
-        "weeks": [
+        "weeks": suggestion or [
             {"week": 1, "topics": ["极限定义", "极限四则运算"]},
             {"week": 3, "topics": ["连续", "间断点"]},
             {"week": 5, "topics": ["导数", "求导法则"]},
@@ -169,7 +187,7 @@ def main() -> int:
             {"week": 11, "topics": ["定积分"]},
         ]
     }
-    step("回填大纲 cache（模拟大模型解析后）", "course.refresh_outline",
+    step("确认/调整后回填大纲 cache（Skill 不调 LLM）", "course.refresh_outline",
          {"id": course_id, "parsed": parsed_outline})
 
     r = step("读大纲（应 has_file=True, cache_present=True, stale=False）",
@@ -207,7 +225,46 @@ def main() -> int:
     if isinstance(r.get("data"), list):
         print(f"  → 本周 {len(r['data'])} 节课")
 
-    step("学校默认时间表", "school.get_schedule")
+    # 额外演示：一门课多个时段 + 连排节次（B1/B2）+ 周次区间（B3）
+    print("\n  ── 附加：一门课多个上课时段 ──")
+    r_multi = step(
+        "建课：周二 3-5 节全期 + 周三 8-9 节单双周 1-7 周 + 周二 1-2 节单双周 9-15 周",
+        "course.create",
+        {
+            "name": "操作系统",
+            "semester_start": "2026-09-07",
+            "semester_end": "2027-01-10",
+            "sections": [
+                {"weekday": 1, "week_pattern": "all", "period_nos": [3, 4, 5]},
+                {"weekday": 2, "week_pattern": "odd", "weeks_range": [1, 7], "period_nos": [8, 9]},
+                {"weekday": 1, "week_pattern": "odd", "weeks_range": [9, 15], "period_nos": [1, 2]},
+            ],
+        },
+        expect_ok=True,
+    )
+    multi_id = (r_multi.get("data") or {}).get("id")
+    if multi_id:
+        r_ap = step(
+            "连排 3-5 节 → 从学校课表取最早开始 / 最晚结束",
+            "course.apply_period",
+            {"id": multi_id, "force": True},
+            expect_ok=False,
+        )
+        d_ap = (r_ap.get("data") or {})
+        secs = d_ap.get("sections") or []
+        if secs:
+            for i, sc in enumerate(secs, start=1):
+                print(f"  → 时段{i}: 节次 {sc.get('period_nos')} "
+                      f"{sc.get('start_time')}~{sc.get('end_time')}")
+        else:
+            print(f"  → start={d_ap.get('start_time')} end={d_ap.get('end_time')}")
+        r_mw = step("查未来 4 周课表（多时段按段展开）",
+                    "course.week",
+                    {"start": "2026-09-07", "weeks": 4}, expect_ok=False)
+        if isinstance(r_mw.get("data"), list):
+            print(f"  → 4 周内共 {len(r_mw['data'])} 节课（每段一行）")
+
+    step("学校默认时间表（source 标明来源）", "school.get_schedule")
 
     # ============== 文件系统列表（看一眼） ==============
     _banner("附录 · 当前文件系统（教学/高等数学）")

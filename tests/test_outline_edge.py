@@ -222,7 +222,9 @@ def t_next_topic() -> None:
     expect("无进度 current_week None", r1["current_week"] is None)
     expect("target_week 2", r1["target_week"] == 2)
     expect("outline_target 含 连续", r1["outline_target"] is not None and "连续" in r1["outline_target"])
-    expect("hint 提示未开讲", r1["hint"].startswith("还没有"))
+    # C1 修复：无进度记录时 lag_weeks 应为 None（不是 target_week），hint 说明无法计算
+    expect("无进度 lag_weeks 为 None", r1["lag_weeks"] is None)
+    expect("hint 说明尚无进度记录", "尚无进度记录" in r1["hint"])
 
     # 场景 B：建一条 progress 第 1 周 → current_week=1, target=3 → lag=2
     service.create_progress({"course_id": c.id, "lesson_date": "2026-03-03", "topic": "极限定义"})
@@ -261,7 +263,57 @@ def t_next_topic_无大纲() -> None:
     r = service.course_next_topic(c.id, date(2026, 3, 17))
     expect("无大纲 outline_target 为 None", r["outline_target"] is None)
     expect("无大纲 current_week=None", r["current_week"] is None)
-    expect("无大纲 lag_weeks 仍可计算", isinstance(r["lag_weeks"], int))
+    # C1 修复：无进度时 lag_weeks 为 None
+    expect("无大纲无进度 lag_weeks 为 None", r["lag_weeks"] is None)
+
+
+def t_outline_week_优先() -> None:
+    section("4.6 C2 修复：ProgressEntry.outline_week 优先于 lesson_date 反推")
+    fresh_data_dir()
+    # 学期 2026-03-02（周一）= 第 1 周；课程每周二
+    c = make_bound_course(
+        name="操作系统",
+        weekday=1,
+        start_time="14:00", end_time="15:40",
+        semester_start="2026-03-02",
+        semester_end="2026-06-30",
+    )
+    write_outline("操作系统", "# 大纲")
+    service.course_set_outline_path(c.id, "outline.md")
+    service.course_refresh_outline(c.id, {"weeks": [
+        {"week": 1, "topics": ["进程"]},
+        {"week": 2, "topics": ["内存"]},
+        {"week": 3, "topics": ["文件"]},
+    ]})
+
+    # 不传 outline_week → 回退 lesson_date 反推
+    service.create_progress({"course_id": c.id, "lesson_date": "2026-03-03", "topic": "进程"})
+    r = service.course_next_topic(c.id, date(2026, 3, 17))  # 第 3 周
+    expect("无 outline_week 时 source=lesson_date", r["current_week_source"] == "lesson_date")
+    expect("lesson_date 反推出第 1 周", r["current_week"] == 1)
+
+    # 传 outline_week=3（教师说"这次课讲的是大纲第 3 周"）→ 应优先
+    service.create_progress({
+        "course_id": c.id, "lesson_date": "2026-03-05",
+        "topic": "文件管理", "outline_week": 3,
+    })
+    r2 = service.course_next_topic(c.id, date(2026, 3, 17))
+    expect("有 outline_week 时 source=progress.outline_week",
+           r2["current_week_source"] == "progress.outline_week")
+    expect("current_week 取 outline_week=3", r2["current_week"] == 3)
+    expect("target_week=3 且 lag=0", r2["lag_weeks"] == 0)
+    expect("hint 一致无落后", "一致" in r2["hint"])
+
+    # outline_week 越界校验
+    expect_raises(
+        "outline_week=61 拒",
+        lambda: service.create_progress({
+            "course_id": c.id, "lesson_date": "2026-03-10",
+            "topic": "x", "outline_week": 61,
+        }),
+        Exception,
+        contains="outline_week",
+    )
 
 
 def main() -> int:
@@ -271,6 +323,7 @@ def main() -> int:
         t_refresh_outline_格式,
         t_next_topic,
         t_next_topic_无大纲,
+        t_outline_week_优先,
     ]
     fails = 0
     for fn in sections:

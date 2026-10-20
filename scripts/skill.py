@@ -90,17 +90,33 @@ from banjiao.llm_errors import SkillError, not_found, bad_param, missing_param  
 
 
 # ---------- 输出工具 ----------
+# 若 main() 指定了 --out-file，则把最终 JSON 写文件（utf-8 无 BOM）而不是 stdout。
+# 这样绕开 shell 重定向（PowerShell > 会写 UTF-16LE / BOM）。
+_OUT_FILE: str | None = None
 
-def _ok(data: Any) -> int:
-    sys.stdout.write(json.dumps({"ok": True, "data": data}, ensure_ascii=False))
-    sys.stdout.write("\n")
+
+def _emit(payload: dict) -> int:
+    """把结果 JSON 输出到 --out-file（若指定）或 stdout。"""
+    text = json.dumps(payload, ensure_ascii=False)
+    if _OUT_FILE:
+        try:
+            Path(_OUT_FILE).write_text(text + "\n", encoding="utf-8")
+            return 0
+        except Exception as e:
+            sys.stdout.write(json.dumps(
+                SkillError("write_failed", f"写入 {_OUT_FILE} 失败：{e}", status=500).to_dict(),
+                ensure_ascii=False) + "\n")
+            return 0
+    sys.stdout.write(text + "\n")
     return 0
 
 
+def _ok(data: Any) -> int:
+    return _emit({"ok": True, "data": data})
+
+
 def _fail(e: SkillError) -> int:
-    sys.stdout.write(json.dumps(e.to_dict(), ensure_ascii=False))
-    sys.stdout.write("\n")
-    return 0  # 永远返回 0，把状态交给 stdout JSON；上层 Agent 据 ok 字段判断
+    return _emit(e.to_dict())  # 永远返回 0，把状态交给 JSON 的 ok 字段
 
 
 def _wrap(callable_):
@@ -115,20 +131,126 @@ def _wrap(callable_):
 
 
 def _load_json_arg(raw: str | None) -> dict:
+    """解析 --json / --json-file 传入的 JSON 字符串。
+
+    三层兼容（按需依次尝试）：
+    1. 原样 json.loads
+    2. 剥掉成对外层引号再试（PowerShell 可能把 '...' 一起传进来）
+    3. 修补"丢失的 JSON 双引号"后再试
+       （PowerShell 5.1 传 native 命令时会把单引号串里的 " 全部吃掉，
+        于是 {"name":"x"} 变成 {name:x}；这里用正则补回 key/value 的引号）
+
+    文件读取统一用 utf-8-sig，兼容 Out-File / > 重定向写出的 BOM。
+    """
     if not raw:
         return {}
     if raw == "@-":
         raw = sys.stdin.read()
     raw = raw.strip()
+
+    # 1) 原样解析
     try:
         return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # 2) 剥掉成对外层引号（'{"a":1}' → {"a":1}）
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        inner = raw[1:-1].strip()
+        try:
+            return json.loads(inner)
+        except json.JSONDecodeError:
+            raw = inner
+
+    # 3) 修补被 PowerShell 吃掉的 JSON 双引号
+    try:
+        return json.loads(_repair_powershell_json(raw))
     except json.JSONDecodeError as e:
         raise SkillError(
             "bad_json",
             f"--json 参数不是合法 JSON：{e}",
             status=400,
-            hint="请用双引号包裹字符串、并确保 UTF-8 直传。",
+            hint=(
+                "若在 PowerShell 下传参，推荐改用 --json-file（UTF-8 即可，"
+                "带 BOM 也能读）；或用 stdin：Get-Content x.json | python scripts/skill.py <action> --json @-"
+            ),
         )
+
+
+def _repair_powershell_json(s: str) -> str:
+    """把 PowerShell 5.1 吃掉双引号后的 JSON 修补回合法 JSON。
+
+    输入形如：  {name:高等数学,weekday:1,notes:含"空格"的文本}
+    输出形如：  {"name":"高等数学","weekday":1,"notes":"含\"空格\"的文本"}
+
+    策略（保守）：
+    - 给 { } 内的裸 key 补引号：  ,xxx:  →  ,"xxx":
+    - 给裸 string value 补引号：  :yyy,  →  :"yyy",
+    - 数组里的裸元素也补引号：    [a,b]  →  ["a","b"]
+    - 数字 / true / false / null 原样保留
+    """
+    import re as _re
+
+    # 已经能解析就别折腾
+    try:
+        json.loads(s)
+        return s
+    except Exception:
+        pass
+
+    out: list[str] = []
+    i = 0
+    n = len(s)
+    # 状态：当前处于 object / array / 期待 value
+    in_str = False
+    esc = False
+
+    def is_value_start(ch: str) -> bool:
+        return ch not in " \t\r\n,:}]"
+
+    while i < n:
+        ch = s[i]
+
+        # 处理字符串内的内容
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+            continue
+
+        # 未在字符串内
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+
+        # 裸 key 或 value 的起止：给未加引号的一段补上引号
+        if ch not in "{}[],:":
+            j = i
+            buf: list[str] = []
+            while j < n and s[j] not in "{}[],:\"" and s[j] not in " \t\r\n":
+                buf.append(s[j])
+                j += 1
+            token = "".join(buf)
+            if token:
+                # 数字 / 布尔 / null 不加引号
+                if _re.fullmatch(r"-?\d+(\.\d+)?([eE][-+]?\d+)?|true|false|null", token):
+                    out.append(token)
+                else:
+                    out.append('"' + token.replace('"', '\\"') + '"')
+                i = j
+                continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
 
 
 # ---------- 路由 ----------
@@ -183,12 +305,15 @@ def route(action: str, raw: str | None) -> int:
                 start = date.fromisoformat(args["start"])
             except ValueError:
                 return _fail(bad_param("start", "应为 YYYY-MM-DD"))
-        return _wrap(lambda: service.week_lessons(start))
+        weeks = int(args.get("weeks", 1) or 1)
+        return _wrap(lambda: service.week_lessons(start, weeks=weeks))
 
     if a == "course.apply_period":
         if "id" not in args:
             return _fail(missing_param("id"))
-        return _wrap(lambda: service.course_apply_period(args["id"]).model_dump(mode="json"))
+        return _wrap(lambda: service.course_apply_period(
+            args["id"], force=bool(args.get("force", False))
+        ).model_dump(mode="json"))
 
     if a == "course.set_outline_path":
         if "id" not in args:
@@ -208,6 +333,17 @@ def route(action: str, raw: str | None) -> int:
         if "parsed" not in args:
             return _fail(missing_param("parsed", "请传 {weeks:[{week,topics:[...]},...]}"))
         return _wrap(lambda: service.course_refresh_outline(args["id"], args["parsed"]).model_dump(mode="json"))
+
+    if a == "course.suggest_outline":
+        if "id" not in args:
+            return _fail(missing_param("id"))
+        if "topics" not in args:
+            return _fail(missing_param("topics", "请传平铺的章节列表，如 [\"第1章 极限\", \"第2章 连续\"]"))
+        wt = args.get("weeks_total")
+        return _wrap(lambda: service.course_suggest_outline(
+            args["id"], args["topics"],
+            weeks_total=int(wt) if wt is not None else None,
+        ))
 
     if a == "course.next_topic":
         if "id" not in args:
@@ -231,7 +367,7 @@ def route(action: str, raw: str | None) -> int:
             payload = ProgressCreate.model_validate(args)
         except Exception as e:
             return _fail(SkillError("bad_param", str(e), status=422))
-        return _wrap(lambda: service.create_progress(payload).model_dump(mode="json"))
+        return _wrap(lambda: service.progress_create_with_warning(payload))
 
     if a == "progress.update":
         from banjiao.models import ProgressUpdate
@@ -375,6 +511,26 @@ def route(action: str, raw: str | None) -> int:
             return _fail(missing_param("path"))
         return _wrap(lambda: service.fs_archive(args["path"]))
 
+    if a == "fs.import_file":
+        if "src" not in args:
+            return _fail(missing_param("src", "请传源文件的绝对路径"))
+        return _wrap(lambda: service.fs_import_file(
+            args["src"],
+            top_kind=args.get("top_kind", "文件"),
+            dirname=args.get("dirname", "资料"),
+            filename=args.get("filename"),
+            role=args.get("role"),
+            archive=bool(args.get("archive", False)),
+        ))
+
+    if a == "fs.list_files":
+        for need in ("top_kind", "dirname"):
+            if need not in args:
+                return _fail(missing_param(need))
+        return _wrap(lambda: service.fs_list_files(
+            args["top_kind"], args["dirname"], subdir=args.get("subdir")
+        ))
+
     if a == "fs.init":
         return _wrap(lambda: service.fs_init())
 
@@ -478,6 +634,8 @@ HELP_TEXT = """伴教 Skill · LLM 入口脚本
 
 
 def main() -> int:
+    global _OUT_FILE
+
     parser = argparse.ArgumentParser(
         prog="skill.py",
         description="伴教 Skill：LLM 直接读写教学事务的入口脚本",
@@ -486,25 +644,29 @@ def main() -> int:
     )
     parser.add_argument("action", nargs="?", help="操作名，如 course.create")
     parser.add_argument("--json", help='JSON 参数；可用 "@-" 从 stdin 读取')
-    parser.add_argument("--json-file", help='从文件读取 JSON 参数')
+    parser.add_argument("--json-file", help='从文件读取 JSON 参数（兼容 UTF-8 BOM）')
+    parser.add_argument("--out-file", help="把结果 JSON 写到此文件（UTF-8 无 BOM），而不是 stdout")
     args = parser.parse_args()
+
+    _OUT_FILE = args.out_file
 
     if not args.action or args.action in ("-h", "--help"):
         sys.stdout.write(HELP_TEXT)
         return 0
 
     if args.json_file:
-        json_payload = Path(args.json_file).read_text(encoding="utf-8")
+        # utf-8-sig：兼容 PowerShell 5.1 的 Out-File / > 重定向写出的 BOM
+        json_payload = Path(args.json_file).read_text(encoding="utf-8-sig")
     else:
         json_payload = args.json
 
     try:
-        return route(args.action, json_payload)
+        rc = route(args.action, json_payload)
     except SkillError as e:
         # main() 也兜底：route() 内部有 _fail 兜住绝大多数情况，
         # 但少数直接 raise（如 _load_json_arg）需要在这里统一化。
-        _fail(e)
-        return 0
+        rc = _fail(e)
+    return rc
 
 
 if __name__ == "__main__":
