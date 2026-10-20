@@ -4,46 +4,26 @@
 
 ---
 
-## 0. 一键安装（让大模型装这个 Skill）
+## 0. 一键安装
 
-把这个 Skill 推给新对话的 AI Agent，复制粘贴下面任一段即可：
-
-### 推荐：跨平台提示词（Windows / Linux / Mac 通用）
+### 让 AI Agent 装（新对话第一条消息，复制粘贴）
 
 ```text
-请安装并演示伴教 Skill（banjiao v0.2.1）：
+请安装并演示伴教 Skill：
+https://github.com/shao-xy/banjiao/releases/download/v0.2.1/banjiao-slim-v0.2.1.zip
 
-URL: https://github.com/shao-xy/banjiao/releases/latest/download/banjiao-slim.zip
-
-请按以下顺序操作（你自己决定用 curl / wget / Invoke-WebRequest / python 等，
-以及下载到哪个目录——建议用 OS 临时目录或 $HOME，不要硬编码 /tmp）：
-
-A) 下载 zip 到本地
-B) 解压得到 banjiao/ 目录
-C) python -m pip install -r banjiao/requirements.txt
-D) 读 banjiao/SKILL.md 的 frontmatter + 全部章节
-E) 跑 banjiao/scripts/demo.py，把每步 stdout 的 ok 字段结果贴出来
-F) 失败的步把 error.message / error.hint 完整贴出来
-
-如果你无法联网下载，告诉我具体错误，不要放弃。
+下载到你系统的临时目录并解压；装 requirements.txt；跑 scripts/demo.py；
+把每步输出贴给我。失败的话告诉我错在哪，不要放弃。
 ```
 
-### 极简版
+### 教师手动装
 
-```text
-请安装并演示伴教 Skill（banjiao v0.2.1）：
-- 下载 https://github.com/shao-xy/banjiao/releases/latest/download/banjiao-slim.zip 到你的临时目录
-- 解压后跑 scripts/demo.py（先装 requirements.txt 依赖）
-- 把 demo 的全部输出贴给我
-```
+1. 浏览器下载 zip（0.06 MB）
+2. 解压到任意英文路径
+3. `python -m pip install -r <解压目录>/banjiao/requirements.txt`
+4. `python <解压目录>/banjiao/scripts/demo.py`
 
-### 手动安装（教师本地试，不靠 Agent）
-
-1. 浏览器下载 [banjiao-slim.zip](https://github.com/shao-xy/banjiao/releases/latest/download/banjiao-slim.zip)（0.06 MB）
-2. 解压到任意目录（路径不要有中文）
-3. `cd <解压目录>/banjiao`
-4. `python -m pip install -r requirements.txt`
-5. `python scripts/demo.py` —— 看 9 步演示输出
+看到 9 步全 ✓ 即为成功。
 
 ---
 

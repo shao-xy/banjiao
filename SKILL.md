@@ -202,37 +202,16 @@ python run_web.py
 
 ---
 
-## 7. 一键安装（让 Agent 装这个 Skill）
+## 7. 一键安装
 
-把以下任一段贴给新对话的 AI Agent 即可（Windows / Linux / Mac 通用）：
-
-### 推荐：跨平台提示词
+把以下文本贴给新对话的 AI Agent：
 
 ```text
-请安装并演示伴教 Skill（banjiao v0.2.1）：
+请安装并演示伴教 Skill：
+https://github.com/shao-xy/banjiao/releases/download/v0.2.1/banjiao-slim-v0.2.1.zip
 
-URL: https://github.com/shao-xy/banjiao/releases/latest/download/banjiao-slim.zip
-
-请按以下顺序操作（你自己决定用 curl / wget / Invoke-WebRequest / python 等，
-以及下载到哪个目录——建议用 OS 临时目录或 $HOME，不要硬编码 /tmp）：
-
-A) 下载 zip 到本地
-B) 解压得到 banjiao/ 目录
-C) python -m pip install -r banjiao/requirements.txt
-D) 读 banjiao/SKILL.md 的 frontmatter + 全部章节
-E) 跑 banjiao/scripts/demo.py，把每步 stdout 的 ok 字段结果贴出来
-F) 失败的步把 error.message / error.hint 完整贴出来
-
-如果你无法联网下载，告诉我具体错误，不要放弃。
-```
-
-### 极简版
-
-```text
-请安装并演示伴教 Skill（banjiao v0.2.1）：
-- 下载 https://github.com/shao-xy/banjiao/releases/latest/download/banjiao-slim.zip 到你的临时目录
-- 解压后跑 scripts/demo.py（先装 requirements.txt 依赖）
-- 把 demo 的全部输出贴给我
+下载到你系统的临时目录并解压；装 requirements.txt；跑 scripts/demo.py；
+把每步输出贴给我。失败的话告诉我错在哪，不要放弃。
 ```
 
 ---
