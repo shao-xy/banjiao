@@ -178,7 +178,16 @@ def main() -> int:
                    help="打包后自动 gh release create v{version}（需要 gh CLI 已登录）")
     args = p.parse_args()
 
-    output = args.output or (DEFAULT_OUTPUT_DIR / "banjiao.zip")
+    # 默认文件名带版本号（v0.2.1 → banjiao-v0.2.1.zip / banjiao-slim-v0.2.1.zip）
+    # 不带 --version 时回退到无版本号旧名（向后兼容）
+    suffix = f"-v{args.version}" if args.version else ""
+    if args.output is None:
+        output = DEFAULT_OUTPUT_DIR / f"banjiao{suffix}.zip"
+        slim = DEFAULT_OUTPUT_DIR / f"banjiao-slim{suffix}.zip"
+    else:
+        output = args.output
+        slim = None  # 自定义路径时不自动生成 slim
+
     package(
         output=output,
         include_tests=not args.no_tests,
@@ -187,8 +196,7 @@ def main() -> int:
     )
 
     # 同时输出"无测试版"到 dist/
-    if not args.no_tests and args.output is None:
-        slim = DEFAULT_OUTPUT_DIR / "banjiao-slim.zip"
+    if not args.no_tests and slim is not None:
         package(output=slim, include_tests=False, include_git=False, version=args.version)
         print(f"\n两个版本：\n  完整: {output}\n  精简: {slim}")
 
